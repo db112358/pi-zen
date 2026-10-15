@@ -1,0 +1,24 @@
+{
+  "name": "pi-zen",
+  "version": "0.1.0",
+  "description": "Zen mode for pi: one row per run, with a click-to-expand list of actions and thinking.",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "author": "David Bailey",
+  "repository": "github:db112358/pi-zen",
+  "pi": {
+    "extensions": [
+      "./extensions/zen.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "scripts": {
+    "test": "node tests/zen-harness.mjs && node tests/zen-real-test.mjs",
+    "test:click": "bash tests/zen-click-test.sh"
+  }
+}
