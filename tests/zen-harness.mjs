@@ -552,5 +552,38 @@ bashColour.renderResult({ content: [], details: {}, isError: false }, { expanded
 const runningRun = bashColour.renderCall({ command: "true" }, theme, r2Ctx).render(80);
 check("a running action keeps the chapter pending", bgOf(runningRun[1]) === CODES.toolPendingBg, String(bgOf(runningRun[1])));
 
+// ---------------------------------------------------------------------------
+// Scenario 15: a new action must not leave a stale footer gap (double blank line) behind.
+reset();
+expandedTools = false;
+startAssistant();
+update(assistant([{ type: "toolCall", id: "call-g1", name: "bash", arguments: { command: "echo one" } }]));
+const bashG = pi.resolver("bash", () => undefined);
+const gRes = { content: [{ type: "text", text: "out" }], details: {}, isError: false };
+const g1Args = { command: "echo one" };
+const g2Args = { command: "echo two" };
+const g1Ctx = context({ toolCallId: "call-g1", args: g1Args, expanded: false });
+const g2Ctx = context({ toolCallId: "call-g2", args: g2Args, expanded: false });
+let g1Result;
+const reG1 = () => {
+	bashG.renderCall(g1Args, theme, g1Ctx);
+	g1Result = bashG.renderResult(gRes, { expanded: false, isPartial: false }, theme, g1Ctx);
+};
+g1Ctx.invalidate = reG1;
+reG1();
+bashG.renderCall(g1Args, theme, g1Ctx).handleMouse({ type: "click", button: "left", x: 5, y: 1, screenX: 5, screenY: 1, width: 80, height: 4, shift: false, alt: false, ctrl: false, clickCount: 1 });
+g1Result = bashG.renderResult(gRes, { expanded: false, isPartial: false }, theme, g1Ctx);
+check("opened row ends with the fold footer", flat(g1Result.render(80)).includes("collapse"), flat(g1Result.render(80)));
+
+startAssistant();
+update(
+	assistant([
+		{ type: "thinking", thinking: "Next plan." },
+		{ type: "toolCall", id: "call-g2", name: "bash", arguments: g2Args },
+	]),
+);
+bashG.renderCall(g2Args, theme, g2Ctx);
+check("old row drops its footer gap when the next action starts", g1Result.render(80).length === 0, JSON.stringify(bgSeq(g1Result.render(80))));
+
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);
