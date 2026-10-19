@@ -34,6 +34,7 @@ const ctx = {
 		setHiddenThinkingLabel: () => {},
 		notify: () => {},
 		setStatus: () => {},
+		onTerminalInput: () => () => {},
 	},
 	sessionManager: { buildContextEntries: () => [] },
 	hasUI: true,

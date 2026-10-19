@@ -1,6 +1,9 @@
 // Throwaway harness: drives zen.ts with a fake pi and asserts on rendered rows.
-import { Container, MouseRegion, Text } from "@earendil-works/pi-tui";
+import { Container, KeybindingsManager, MouseRegion, setKeybindings, Text } from "@earendil-works/pi-tui";
 import { createJiti } from "jiti";
+
+// The installed pi registers this binding; the harness has to as well for the key to be known.
+setKeybindings(new KeybindingsManager({ "app.tools.expand": { defaultKeys: "ctrl+o" } }));
 
 const jiti = createJiti(import.meta.url);
 const mod = await jiti.import(new URL("../extensions/zen.ts", import.meta.url).pathname);
@@ -24,6 +27,7 @@ const pi = {
 mod.default(pi);
 
 const sessionManager = { buildContextEntries: () => [] };
+const inputHandlers = new Set();
 const ui = {
 	getToolsExpanded: () => expandedTools,
 	setToolsExpanded: (v) => {
@@ -32,8 +36,20 @@ const ui = {
 	setHiddenThinkingLabel: () => {},
 	notify: () => {},
 	setStatus: () => {},
+	onTerminalInput: (handler) => {
+		inputHandlers.add(handler);
+		return () => inputHandlers.delete(handler);
+	},
 };
 const ctx = { mode: "tui", ui, sessionManager, hasUI: true };
+
+/** Press a key the way the TUI does, returning whether an extension consumed it. */
+function pressKey(data) {
+	for (const handler of inputHandlers) {
+		if (handler(data)?.consume) return true;
+	}
+	return false;
+}
 
 function reset() {
 	handlers.get("session_start")({}, ctx);
@@ -366,6 +382,175 @@ firstComp.handleMouse({ ...rowClick, y: 4 });
 firstComp.handleMouse({ ...rowClick, y: 1 });
 const foldedChapter = flat(writeR.renderCall(runWriteArgs, theme, wCtx).render(80));
 check("chapter header folds it back", foldedChapter.includes("actions") && !foldedChapter.includes("echo one"), foldedChapter);
+
+// ---------------------------------------------------------------------------
+// Scenario 12: an open chapter folds from its footer as well as its header.
+reset();
+expandedTools = false;
+startAssistant();
+const footMsg = assistant([
+	{ type: "toolCall", id: "call-f1", name: "bash", arguments: { command: "echo one" } },
+	{ type: "toolCall", id: "call-f2", name: "bash", arguments: { command: "echo two" } },
+]);
+update(footMsg);
+const bashF = pi.resolver("bash", () => undefined);
+const f1Args = { command: "echo one" };
+const f2Args = { command: "echo two" };
+const fRes = { content: [{ type: "text", text: "out" }], details: {}, isError: false };
+const f1Ctx = context({ toolCallId: "call-f1", args: f1Args, expanded: false });
+const f2Ctx = context({ toolCallId: "call-f2", args: f2Args, expanded: false });
+const reF1 = () => {
+	bashF.renderCall(f1Args, theme, f1Ctx);
+	bashF.renderResult(fRes, { expanded: false, isPartial: false }, theme, f1Ctx);
+};
+const reF2 = () => {
+	bashF.renderCall(f2Args, theme, f2Ctx);
+	bashF.renderResult(fRes, { expanded: false, isPartial: false }, theme, f2Ctx);
+};
+f1Ctx.invalidate = reF1;
+f2Ctx.invalidate = reF2;
+reF1();
+reF2();
+
+const fClick = { type: "click", button: "left", x: 5, y: 1, screenX: 5, screenY: 1, width: 80, height: 4, shift: false, alt: false, ctrl: false, clickCount: 1 };
+bashF.renderCall(f2Args, theme, f2Ctx).handleMouse(fClick);
+reF1();
+reF2();
+
+const openLast = bashF.renderResult(fRes, { expanded: false, isPartial: false }, theme, f2Ctx);
+const openLastLines = flat(openLast.render(80));
+check("open chapter ends with a fold row", openLastLines.includes("▲") && openLastLines.includes("collapse"), openLastLines);
+check("footer counts the chapter's actions", openLastLines.includes("2 actions"), openLastLines);
+
+// Header and footer are the same row: one padded neutral line, not the tool's colours.
+const footerRegion = openLast.children.at(-1);
+const footerLines = footerRegion.render(80);
+const headerLines = bashF.renderCall(f1Args, theme, f1Ctx).render(80).slice(0, 3);
+const headerLine = flat(headerLines).split("\n");
+check(
+	"header is the fold row, not the action it ends with",
+	headerLine[1].includes("▼") && headerLine[1].includes("click to collapse") && !flat(headerLines).includes("echo two"),
+	flat(headerLines),
+);
+check(
+	"header and footer share the row background",
+	JSON.stringify(bgSeq(headerLines)) === JSON.stringify(bgSeq(footerLines)),
+	`${JSON.stringify(bgSeq(headerLines))} vs ${JSON.stringify(bgSeq(footerLines))}`,
+);
+check(
+	"bookends are neutral rather than tool-coloured",
+	bgOf(footerLines[1]) === CODES.toolPendingBg,
+	String(bgOf(footerLines[1])),
+);
+check("footer is one padded line like the header", footerLines.length === 3 && flat(footerLines).split("\n")[1].includes("▲") && flat(footerLines).split("\n")[1].includes("click to collapse"), flat(footerLines));
+check(
+	"footer is gapped from the action above it",
+	JSON.stringify(bgSeq(openLast.render(80)).slice(-4)) === JSON.stringify([0, CODES.toolPendingBg, CODES.toolPendingBg, CODES.toolPendingBg]),
+	JSON.stringify(bgSeq(openLast.render(80)).slice(-4)),
+);
+
+openLast.children.at(-1).handleMouse({ ...fClick, y: 3 });reF1();
+reF2();
+const foldedByFooter = flat(bashF.renderCall(f2Args, theme, f2Ctx).render(80));
+check("footer folds the chapter back", foldedByFooter.includes("▶") && !foldedByFooter.includes("echo one"), foldedByFooter);
+
+// The footer follows the newest row: a chapter that grows moves it.
+bashF.renderCall(f2Args, theme, f2Ctx).handleMouse(fClick);
+reF1();
+reF2();
+startAssistant();
+update(assistant([{ type: "toolCall", id: "call-f3", name: "bash", arguments: { command: "echo three" } }]));
+const f3Args = { command: "echo three" };
+const f3Ctx = context({ toolCallId: "call-f3", args: f3Args, expanded: false });
+f3Ctx.invalidate = () => {
+	bashF.renderCall(f3Args, theme, f3Ctx);
+	bashF.renderResult(fRes, { expanded: false, isPartial: false }, theme, f3Ctx);
+};
+f3Ctx.invalidate();
+const oldLast = flat(bashF.renderResult(fRes, { expanded: false, isPartial: false }, theme, f2Ctx).render(80));
+check("footer leaves the row it no longer ends", !oldLast.includes("collapse"), oldLast);
+const newLast = flat(bashF.renderResult(fRes, { expanded: false, isPartial: false }, theme, f3Ctx).render(80));
+check("footer moves to the newest row", newLast.includes("collapse") && newLast.includes("3 actions"), newLast);
+
+// ---------------------------------------------------------------------------
+// Scenario 13: ctrl+o folds what is open instead of expanding everything.
+reset();
+expandedTools = false;
+startAssistant();
+update(
+	assistant([
+		{ type: "toolCall", id: "call-k1", name: "bash", arguments: f1Args },
+		{ type: "toolCall", id: "call-k2", name: "bash", arguments: f2Args },
+	]),
+);
+const bashK = pi.resolver("bash", () => undefined);
+const k1Ctx = context({ toolCallId: "call-k1", args: f1Args, expanded: false });
+const k2Ctx = context({ toolCallId: "call-k2", args: f2Args, expanded: false });
+const reK1 = () => {
+	bashK.renderCall(f1Args, theme, k1Ctx);
+	bashK.renderResult(fRes, { expanded: false, isPartial: false }, theme, k1Ctx);
+};
+const reK2 = () => {
+	bashK.renderCall(f2Args, theme, k2Ctx);
+	bashK.renderResult(fRes, { expanded: false, isPartial: false }, theme, k2Ctx);
+};
+k1Ctx.invalidate = reK1;
+k2Ctx.invalidate = reK2;
+reK1();
+reK2();
+
+check("ctrl+o is left to the core toggle when nothing is open", pressKey("\x0f") === false);
+
+bashK.renderCall(f2Args, theme, k2Ctx).handleMouse(fClick);
+reK1();
+reK2();
+const consumed = pressKey("\x0f");
+reK1();
+reK2();
+const afterKey = flat(bashK.renderCall(f2Args, theme, k2Ctx).render(80));
+check("ctrl+o folds an open chapter instead of expanding", consumed === true && afterKey.includes("▶") && !afterKey.includes("echo one"), afterKey);
+check("ctrl+o leaves the global expand state alone", expandedTools === false);
+
+// Under expand-all the same key collapses both the list and the chapter behind it.
+bashK.renderCall(f2Args, theme, k2Ctx).handleMouse(fClick);
+reK1();
+reK2();
+expandedTools = true;
+const consumedAll = pressKey("\x0f");
+reK1();
+reK2();
+const afterAll = flat(bashK.renderCall(f2Args, theme, k2Ctx).render(80));
+check("ctrl+o under expand-all collapses it", consumedAll === true && expandedTools === false, String(expandedTools));
+check("and folds the chapter it had open", afterAll.includes("▶"), afterAll);
+
+// ---------------------------------------------------------------------------
+// Scenario 14: a folded chapter is coloured by its latest result.
+reset();
+expandedTools = false;
+startAssistant();
+update(
+	assistant([
+		{ type: "toolCall", id: "call-r1", name: "bash", arguments: { command: "false" } },
+		{ type: "toolCall", id: "call-r2", name: "bash", arguments: { command: "true" } },
+	]),
+);
+const bashColour = pi.resolver("bash", () => undefined);
+const r1Ctx = context({ toolCallId: "call-r1", args: { command: "false" }, expanded: false, isError: true });
+const r2Ctx = context({ toolCallId: "call-r2", args: { command: "true" }, expanded: false });
+bashColour.renderCall({ command: "false" }, theme, r1Ctx);
+bashColour.renderResult({ content: [], details: {}, isError: true }, { expanded: false, isPartial: false }, theme, r1Ctx);
+const failedRun = bashColour.renderCall({ command: "false" }, theme, r1Ctx).render(80);
+check("a chapter ending in a failure is red", bgOf(failedRun[1]) === CODES.toolErrorBg, String(bgOf(failedRun[1])));
+
+bashColour.renderCall({ command: "true" }, theme, r2Ctx);
+bashColour.renderResult({ content: [], details: {}, isError: false }, { expanded: false, isPartial: false }, theme, r2Ctx);
+const recoveredRun = bashColour.renderCall({ command: "true" }, theme, r2Ctx).render(80);
+check("a chapter that recovered shows its latest success", bgOf(recoveredRun[1]) === CODES.toolSuccessBg, String(bgOf(recoveredRun[1])));
+check("...and still counts the failure it survived", flat(recoveredRun).includes("1 failed"), flat(recoveredRun));
+
+bashColour.renderResult({ content: [], details: {}, isError: false }, { expanded: false, isPartial: true }, theme, r2Ctx);
+const runningRun = bashColour.renderCall({ command: "true" }, theme, r2Ctx).render(80);
+check("a running action keeps the chapter pending", bgOf(runningRun[1]) === CODES.toolPendingBg, String(bgOf(runningRun[1])));
 
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

@@ -119,6 +119,41 @@ else
 	echo "ok   chapter header folds it back"
 fi
 
+# The footer is the same fold target at the end of the list, where a long chapter is read.
+chapter_y="$(row_of "actions")"
+click_row "$chapter_y"
+sleep 1
+footer_y="$(row_of "▲")"
+if [ -z "$footer_y" ]; then
+	echo "FAIL opened chapter has no footer row"
+	screen
+	failures=$((failures + 1))
+else
+	click_row "$footer_y"
+	sleep 1
+	if screen | grep -q "ZENOUT-one"; then
+		echo "FAIL footer did not fold the rows"
+		screen
+		failures=$((failures + 1))
+	else
+		echo "ok   footer folds the chapter back"
+	fi
+fi
+
+# ctrl+o folds what is open instead of expanding every chapter.
+chapter_y="$(row_of "actions")"
+click_row "$chapter_y"
+sleep 1
+tmux send-keys -t "$NAME" C-o
+sleep 1
+if screen | grep -q "ZENOUT-one"; then
+	echo "FAIL ctrl+o did not fold the open chapter"
+	screen
+	failures=$((failures + 1))
+else
+	echo "ok   ctrl+o folds the open chapter"
+fi
+
 # Reopen and check the individual rows.
 chapter_y="$(row_of "actions")"
 click_row "$chapter_y"
