@@ -6,11 +6,13 @@ Tool calls and thinking fold into a single row that follows the latest action, s
 cannot bury the conversation in command output.
 
 - **Chapter row** — everything since the last user message is one `▶ N actions · …` line.
-- **Click it** — the chapter opens into one summary row per action and thinking block, headed by
-  a `▼` row that folds it back.
+- **Click it** — the chapter opens into one summary row per action and thinking block, closed by
+  a `▼` row above and an `▲` row below; either one folds it back, so a long chapter never strands
+  the fold target at the top.
 - **Click a row** — thinking rows toggle between a one-line gist and the full text; action rows
   open the tool's own detail (command output, diff, file content).
-- **ctrl+o** — the same list for every chapter at once.
+- **ctrl+o** — the same list for every chapter at once. While a chapter is open, ctrl+o folds it
+  first instead of expanding everything.
 - **`/zen on|off`** — toggle zen rendering; the choice persists across sessions.
 
 ## Requirements
