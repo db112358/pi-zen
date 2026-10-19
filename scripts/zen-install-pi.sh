@@ -68,6 +68,8 @@ if [ "$build" = true ]; then
 		hydrate_from_pin
 		(cd "$CHECKOUT" && npm run build:offline)
 	fi
+	# The coding-agent build type-checks against pi-tui's built declarations.
+	(cd "$CHECKOUT" && npm --prefix packages/tui run build)
 	(cd "$CHECKOUT" && npm --prefix packages/coding-agent run build)
 fi
 
