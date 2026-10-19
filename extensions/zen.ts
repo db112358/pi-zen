@@ -128,9 +128,10 @@ function toolEntry(toolCallId: string, standalone: boolean): Entry {
 		const run = (current ??= { entries: [] });
 		entry.run = run;
 		run.entries.push(entry);
-		// The footer follows the newest row, so the row that had it has to redraw without it.
-		if (run.lastTool) invalidators.get(run.lastTool.id)?.();
+		// Move the marker first: the old row must redraw without the footer.
+		const previous = run.lastTool;
 		run.lastTool = entry;
+		if (previous) invalidators.get(previous.id)?.();
 	}
 	byId.set(toolCallId, entry);
 	return entry;
