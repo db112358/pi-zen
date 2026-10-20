@@ -68,6 +68,12 @@ if [ "$build" = true ]; then
 		hydrate_from_pin
 		(cd "$CHECKOUT" && npm run build:offline)
 	fi
+	# The coding-agent bundle inlines workspace deps from their built dist, so a
+	# source-only change in one of them would otherwise silently never ship.
+	# Dependency order: ai needs telemetry; agent needs ai.
+	(cd "$CHECKOUT" && for pkg in telemetry ai codemode mcp agent; do
+		npm --prefix "packages/$pkg" run build
+	done)
 	# The coding-agent build type-checks against pi-tui's built declarations.
 	(cd "$CHECKOUT" && npm --prefix packages/tui run build)
 	(cd "$CHECKOUT" && npm --prefix packages/coding-agent run build)
