@@ -6,6 +6,9 @@ Tool calls and thinking fold into a single row that follows the latest action, s
 cannot bury the conversation in command output.
 
 - **Chapter row** — everything since the last user message is one `▶ N actions · …` line.
+- **First thinking** — a run with no action yet shows its thinking as the same purple row in the
+  transcript, until the first tool call gives the chapter a row. A narrative row (`set_andon`)
+  never takes that row over: it stays above the card.
 - **Click it** — the chapter opens into one summary row per action and thinking block, closed by
   a `▼` row above and an `▲` row below; either one folds it back, so a long chapter never strands
   the fold target at the top.
@@ -18,7 +21,9 @@ cannot bury the conversation in command output.
 ## Requirements
 
 Zen needs a pi that can omit hidden thinking blocks: `setHiddenThinkingLabel("")` leaves the
-block out instead of drawing a blank row, and a thinking-only message reserves no spacer.
+block out instead of drawing a blank row, a thinking-only message reserves no spacer, and
+`ctx.ui.setThinkingRow()` lets zen draw the run's purple thinking row in its place. Without the
+row hook the gist rides the working line instead.
 
 That patch lives on the `local/zen` branch of [db112358/pi](https://github.com/db112358/pi).
 Without it zen still loads, but warns once and falls back to pi's default thinking label.
