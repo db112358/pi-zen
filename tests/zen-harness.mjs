@@ -1,5 +1,5 @@
 // Throwaway harness: drives zen.ts with a fake pi and asserts on rendered rows.
-import { Container, KeybindingsManager, MouseRegion, setKeybindings, Text } from "@earendil-works/pi-tui";
+import { Container, KeybindingsManager, MouseRegion, setKeybindings, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { createJiti } from "jiti";
 
 // The installed pi registers this binding; the harness has to as well for the key to be known.
@@ -16,6 +16,7 @@ const theme = {
 };
 
 let expandedTools = false;
+let workingMessage;
 const handlers = new Map();
 const pi = {
 	on: (event, handler) => handlers.set(event, handler),
@@ -34,6 +35,9 @@ const ui = {
 		expandedTools = v;
 	},
 	setHiddenThinkingLabel: () => {},
+	setWorkingMessage: (message) => {
+		workingMessage = message;
+	},
 	notify: () => {},
 	setStatus: () => {},
 	onTerminalInput: (handler) => {
@@ -61,10 +65,10 @@ function startAssistant() {
 	handlers.get("message_start")({ message: assistant([]) });
 }
 function update(message) {
-	handlers.get("message_update")({ message });
+	handlers.get("message_update")({ message }, ctx);
 }
 function end(message) {
-	handlers.get("message_end")({ message });
+	handlers.get("message_end")({ message }, ctx);
 }
 function context(over = {}) {
 	return {
@@ -584,6 +588,134 @@ update(
 );
 bashG.renderCall(g2Args, theme, g2Ctx);
 check("old row drops its footer gap when the next action starts", g1Result.render(80).length === 0, JSON.stringify(bgSeq(g1Result.render(80))));
+
+// ---------------------------------------------------------------------------
+// Scenario 16: a run that begins with thinking has no row to draw it on yet, so the working
+// line carries the gist until the first tool call gives the chapter a row.
+reset();
+expandedTools = false;
+check("no working gist before anything streams", workingMessage === undefined, String(workingMessage));
+startAssistant();
+update(assistant([{ type: "thinking", thinking: "First look at the board.\nHidden detail." }]));
+check("the first thinking rides the working line", workingMessage === "thinking First look at the board.", String(workingMessage));
+startAssistant();
+update(
+	assistant([
+		{ type: "thinking", thinking: "First look at the board.\nHidden detail." },
+		{ type: "toolCall", id: "call-w", name: "bash", arguments: { command: "ls" } },
+	]),
+);
+check("the working line clears once a tool call arrives", workingMessage === undefined, String(workingMessage));
+startAssistant();
+update(assistant([{ type: "thinking", thinking: "First look at the board.\nHidden detail." }]));
+startAssistant();
+update(assistant([{ type: "thinking", thinking: "First look at the board.\nHidden detail." }, { type: "text", text: "answer" }]));
+check("the working line clears when the answer starts", workingMessage === undefined, String(workingMessage));
+startAssistant();
+update(assistant([{ type: "thinking", thinking: "x".repeat(300) }]));
+check("a long gist is cut to one row", visibleWidth(String(workingMessage)) <= 76, `${visibleWidth(String(workingMessage))} cells`);
+handlers.get("turn_start")({}, ctx);
+check("a new turn starts from a clean line", workingMessage === undefined, String(workingMessage));
+
+// ---------------------------------------------------------------------------
+// Scenario 17: with pi's thinking-row hook, a run with no action draws the same purple row in the
+// transcript, and the working line stays out of the way.
+const chatRenderers = [];
+const hookedCtx = {
+	...ctx,
+	ui: {
+		...ui,
+		setThinkingRow: (renderer) => {
+			chatRenderers.push(renderer);
+		},
+	},
+};
+handlers.get("session_start")({}, hookedCtx);
+expandedTools = false;
+startAssistant();
+const chatMsg = assistant([{ type: "thinking", thinking: "Chat row plan.\nChat row detail." }]);
+update(chatMsg);
+const chatRenderer = chatRenderers.at(-1);
+const chatRow = chatRenderer(chatMsg, { expanded: false, outputPad: 1 }, theme);
+const chatLines = chatRow.render(80);
+check("chat row shows the thinking gist", flat(chatLines).includes("thinking Chat row plan."), flat(chatLines));
+check("chat row is purple", hasBg(chatLines, "customMessageBg"), JSON.stringify(bgSeq(chatLines)));
+check("chat row replaces the working line", workingMessage === undefined, String(workingMessage));
+chatRow.handleMouse({ type: "click", button: "left", x: 5, y: 2, screenX: 5, screenY: 2, width: 80, height: 5, shift: false, alt: false, ctrl: false, clickCount: 1 });
+check("chat row opens the full thinking", flat(chatRow.render(80)).includes("Chat row detail."), flat(chatRow.render(80)));
+startAssistant();
+const chatToolMsg = assistant([
+	{ type: "thinking", thinking: "Chat row plan." },
+	{ type: "toolCall", id: "call-chat", name: "bash", arguments: { command: "ls" } },
+]);
+update(chatToolMsg);
+check(
+	"a message with a tool call gets no chat row",
+	chatRenderer(chatToolMsg, { expanded: false, outputPad: 1 }, theme) === undefined,
+	"row still returned",
+);
+pi.resolver("bash", () => undefined).renderCall({ command: "ls" }, theme, context({ toolCallId: "call-chat", args: { command: "ls" }, expanded: false }));
+check(
+	"the chat row folds away once the run has a tool action",
+	chatRenderer(chatMsg, { expanded: false, outputPad: 1 }, theme) === undefined,
+	"row still returned",
+);
+
+// A reload rebuilds the entries; a stored run with no action keeps its row.
+const storedChat = assistant([
+	{ type: "thinking", thinking: "Stored chat plan." },
+	{ type: "text", text: "stored answer" },
+]);
+handlers.get("session_start")(
+	{},
+	{
+		...hookedCtx,
+		sessionManager: { buildContextEntries: () => [{ type: "message", message: storedChat }] },
+	},
+);
+const storedChatRow = chatRenderers.at(-1)(storedChat, { expanded: false, outputPad: 1 }, theme);
+check(
+	"a stored tool-less run keeps its chat row",
+	storedChatRow !== undefined && flat(storedChatRow.render(80)).includes("Stored chat plan."),
+	String(storedChatRow && flat(storedChatRow.render(80))),
+);
+
+// A narrative tool heads its own chapter but keeps the chat row that led to it.
+handlers.get("session_start")({}, hookedCtx);
+expandedTools = false;
+startAssistant();
+const andonMsg = assistant([
+	{ type: "thinking", thinking: "Andon plan." },
+	{ type: "toolCall", id: "call-chat-andon", name: "set_andon", arguments: { title: "Task" } },
+]);
+update(andonMsg);
+const andonRenderer = pi.resolver("set_andon", () => undefined);
+const andonChatCtx = context({ toolCallId: "call-chat-andon", args: { title: "Task" }, expanded: false });
+andonRenderer.renderCall({ title: "Task" }, theme, andonChatCtx);
+const andonChatRow = chatRenderers.at(-1)(andonMsg, { expanded: false, outputPad: 1 }, theme);
+check(
+	"a narrative tool keeps the chat row that led to it",
+	andonChatRow !== undefined && flat(andonChatRow.render(80)).includes("Andon plan."),
+	String(andonChatRow && flat(andonChatRow.render(80))),
+);
+const andonExpanded = flat(andonRenderer.renderCall({ title: "Task" }, theme, { ...andonChatCtx, expanded: true }).render(80));
+check("the expanded narrative row does not repeat it", !andonExpanded.includes("Andon plan."), andonExpanded);
+
+// A chapter tool still takes the row over.
+startAssistant();
+const chapterMsg = assistant([
+	{ type: "thinking", thinking: "Chapter plan." },
+	{ type: "toolCall", id: "call-chat-bash", name: "bash", arguments: { command: "ls" } },
+]);
+update(chapterMsg);
+check(
+	"a chapter tool call still folds the chat row away",
+	chatRenderers.at(-1)(chapterMsg, { expanded: false, outputPad: 1 }, theme) === undefined,
+	"row still returned",
+);
+
+// Back to a pi without the hook: the working line carries the gist again.
+handlers.get("session_start")({}, ctx);
 
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

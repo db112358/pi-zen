@@ -21,6 +21,13 @@ type Context = Parameters<NonNullable<ToolRenderers["renderCall"]>>[2];
 type Result = Parameters<NonNullable<ToolRenderers["renderResult"]>>[0];
 type Background = "toolPendingBg" | "toolErrorBg" | "toolSuccessBg";
 
+/** pi's `setThinkingRow` shape, so zen loads against a build without the hook. */
+type ThinkingRowRenderer = (
+	message: MaybeMessage,
+	options: { expanded: boolean; outputPad: number },
+	theme: Theme,
+) => Component | undefined;
+
 const HEADER_CHARS = 100;
 const SUMMARY_CHARS = 120;
 /** A command is kept whole so the row can use whatever width it has; only absurd lines are cut. */
@@ -52,6 +59,8 @@ interface Entry {
 	summary: string;
 	/** Whether the row shows its thinking in full rather than as a one-line gist. */
 	open?: boolean;
+	/** Narrative rows never take a thinking row over. */
+	narrative?: boolean;
 	/** Message the thinking came from, thinking only; the detail is read from it at render time. */
 	message?: MaybeMessage;
 	done: boolean;
@@ -76,6 +85,17 @@ let thinkingId: string | undefined;
 let thinkingCount = 0;
 /** Whether the transcript shows tool output expanded, as opposed to one clicked row. */
 let expandedAll = (): boolean => false;
+/** Thinking gist on the working line, while the run has no row to draw it on. */
+let workingGist: string | undefined;
+/** Whether pi omits thinking, and whether zen draws the row in its place. */
+let omitsThinking = false;
+let useChatRow = false;
+/** pi's `setThinkingRow`, when the installed build has one. */
+let thinkingRowHook: ((renderer: ThinkingRowRenderer | undefined) => void) | undefined;
+/** A message's thinking entry, so its chat row finds it after streaming. */
+let messageEntries = new WeakMap<object, Entry>();
+/** One purple row per message, kept across the rebuild every delta causes. */
+let chatRows = new WeakMap<object, { pad: number; row: ChatThinkingRow }>();
 /** Detaches the terminal-input listener that makes ctrl+o fold before it expands. */
 let stopExpandKey: (() => void) | undefined;
 let warnedAboutPatch = false;
@@ -105,10 +125,10 @@ function toolEntry(toolCallId: string, standalone: boolean): Entry {
 	if (existing) {
 		return existing;
 	}
-	const entry: Entry = { id: toolCallId, kind: "tool", run: undefined, header: { main: "", suffix: "" }, summary: "", done: false, error: false };
+	const entry: Entry = { id: toolCallId, kind: "tool", run: undefined, header: { main: "", suffix: "" }, summary: "", done: false, error: false, narrative: standalone };
 	if (standalone) {
-		// A narrative row heads its own chapter and takes the thinking that led to it; left
-		// behind, that thinking would have no row to draw it.
+		// A narrative row heads its own chapter and takes the thinking that led to it, which
+		// otherwise would only have the chat row to draw it.
 		const run: Run = { entries: [] };
 		entry.run = run;
 		if (current) {
@@ -151,6 +171,12 @@ function thinkingEntry(id: string): Entry {
 
 function lastEntry(run: Run): Entry | undefined {
 	return run.entries[run.entries.length - 1];
+}
+
+/** The tool that has taken a run's thinking over; narrative rows never do. */
+function takingOver(run: Run | undefined): Entry | undefined {
+	const last = run?.lastTool;
+	return last?.narrative ? undefined : last;
 }
 
 /** Only the newest tool row of a chapter draws the chapter, so the rest fold away. */
@@ -427,6 +453,25 @@ function hasThinking(message: MaybeMessage): boolean {
 	);
 }
 
+/** Whether a message carries a tool call: the action that will draw its thinking. */
+function carriesToolCall(message: MaybeMessage): boolean {
+	return (
+		Array.isArray(message.content) &&
+		(message.content as ReadonlyArray<{ type: string }>).some((block) => block.type === "toolCall")
+	);
+}
+
+/** Whether the message holds only thinking so far, so the working line can stand in for it. */
+function thinkingOnly(message: MaybeMessage): boolean {
+	return (
+		!carriesToolCall(message) &&
+		Array.isArray(message.content) &&
+		!(message.content as ReadonlyArray<{ type: string; text?: string }>).some(
+			(block) => block.type === "text" && block.text?.trim(),
+		)
+	);
+}
+
 /** The one-line gist of a message's thinking, scanned without building the whole text. */
 function thinkingGist(message: MaybeMessage): string {
 	if (message.role !== "assistant" || !Array.isArray(message.content)) {
@@ -442,6 +487,23 @@ function thinkingGist(message: MaybeMessage): string {
 		}
 	}
 	return "";
+}
+
+/**
+ * Without the row hook a run's first thinking has no transcript row, so the working line carries
+ * its gist until a tool call gives it one. Cut so the line cannot wrap.
+ */
+function showWorkingGist(ctx: ExtensionContext, gist: string | undefined): void {
+	// Plain text: the resets truncation adds would end the row's colour early.
+	const text =
+		gist === undefined
+			? undefined
+			: `thinking ${truncateToWidth(gist, Math.max(20, (process.stdout.columns ?? 80) - 16), "…").replace(/\u001b\[0m/g, "")}`;
+	if (ctx.mode !== "tui" || workingGist === text) {
+		return;
+	}
+	workingGist = text;
+	ctx.ui.setWorkingMessage(text);
 }
 
 function shorten(path: string): string {
@@ -808,6 +870,88 @@ class ThinkingRows implements Component {
 	}
 }
 
+/**
+ * A run without a chapter tool draws its thinking as the same purple row the ctrl+o list shows.
+ * It reads live state, so it streams in place and folds away on the next draw.
+ */
+class ChatThinkingRow implements Component {
+	private readonly text: Text;
+	private content = "";
+
+	constructor(
+		private readonly entryId: string,
+		private readonly theme: Theme,
+		private readonly outputPad: number,
+	) {
+		this.text = new Text("", outputPad, 1, (line) => theme.bg(THINKING_BG, line));
+	}
+
+	render(width: number): string[] {
+		const entry = byId.get(this.entryId);
+		if (!entry || takingOver(entry.run)) {
+			return [];
+		}
+		const inner = Math.max(1, width - this.outputPad * 2 - 1);
+		const content = entry.open
+			? thinkingDetail(entry, this.theme)
+			: keepBackground(truncateToWidth(entryLine(entry, this.theme, inner), inner, "…"));
+		if (content !== this.content) {
+			this.text.setText(content);
+			this.content = content;
+		}
+		return this.text.render(width);
+	}
+
+	/** A click opens the full thinking, as in the ctrl+o list. */
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		const entry = byId.get(this.entryId);
+		if (event.type !== "click" || event.button !== "left" || !entry) {
+			return undefined;
+		}
+		entry.open = !entry.open;
+		refreshChatRow();
+		return { handled: true };
+	}
+
+	invalidate(): void {
+		this.text.invalidate();
+	}
+}
+
+/** Whether the message's first tool call draws its thinking on a chapter row, not a narrative one. */
+function carriesChapterToolCall(message: MaybeMessage): boolean {
+	if (!Array.isArray(message.content)) {
+		return false;
+	}
+	const first = (message.content as ReadonlyArray<{ type: string; name?: string }>).find(
+		(block) => block.type === "toolCall",
+	);
+	return first !== undefined && !narrative(first.name ?? "");
+}
+
+/** The row pi draws for a message whose thinking it omits, while no chapter row has taken it over. */
+function chatThinkingRow(
+	message: MaybeMessage,
+	options: { expanded: boolean; outputPad: number },
+	theme: Theme,
+): Component | undefined {
+	const entry = messageEntries.get(message);
+	if (!zen || !entry || takingOver(entry.run) || carriesChapterToolCall(message)) {
+		return undefined;
+	}
+	let cached = chatRows.get(message);
+	if (!cached || cached.pad !== options.outputPad) {
+		cached = { pad: options.outputPad, row: new ChatThinkingRow(entry.id, theme, options.outputPad) };
+		chatRows.set(message, cached);
+	}
+	return cached.row;
+}
+
+/** Redraw the chat's thinking rows: they have no invalidator to hand pi. */
+function refreshChatRow(): void {
+	thinkingRowHook?.(useChatRow ? chatThinkingRow : undefined);
+}
+
 /** Consumes clicks in the expanded list so a gap or padding line cannot fold the whole row away. */
 function consumeClick(
 	context: Context,
@@ -917,7 +1061,7 @@ function thinkingText(message: MaybeMessage): string {
 }
 
 /** Fold a message's thinking into the chapter, as the action that is running now. */
-function trackThinking(message: MaybeMessage): void {
+function trackThinking(message: MaybeMessage, ctx: ExtensionContext): void {
 	if (message.role !== "assistant" || !thinkingId || !hasThinking(message)) {
 		return;
 	}
@@ -926,6 +1070,11 @@ function trackThinking(message: MaybeMessage): void {
 	// one first-line scan per delta instead of rebuilding the whole text.
 	entry.message = message;
 	entry.header = { main: thinkingGist(message), suffix: "" };
+	messageEntries.set(message, entry);
+	// A later message trails a chapter row that draws its thinking; with the hook pi draws the row itself.
+	const carried =
+		zen && omitsThinking && !useChatRow && !entry.run?.lastTool && thinkingOnly(message) ? entry.header.main : "";
+	showWorkingGist(ctx, carried || undefined);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -934,12 +1083,16 @@ export default function (pi: ExtensionAPI) {
 		expandedAll = ctx.mode === "tui" ? () => ctx.ui.getToolsExpanded() : () => false;
 		rebuild(ctx);
 		applyThinkingLabel(ctx);
+		applyThinkingRow(ctx);
+		showWorkingGist(ctx, undefined);
 		watchExpandKey(ctx);
 	});
 
 	pi.on("session_shutdown", () => {
 		stopExpandKey?.();
 		stopExpandKey = undefined;
+		// The UI goes away with the session; only the cached text has to forget it.
+		workingGist = undefined;
 	});
 
 	// A tree jump replaces the transcript; the chapters have to follow it.
@@ -957,8 +1110,11 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("message_update", (event) => trackThinking(event.message));
-	pi.on("message_end", (event) => trackThinking(event.message));
+	pi.on("message_update", (event, ctx) => trackThinking(event.message, ctx));
+	pi.on("message_end", (event, ctx) => trackThinking(event.message, ctx));
+	// Each model request starts from a clean line; the first thinking sets it again.
+	pi.on("turn_start", (_event, ctx) => showWorkingGist(ctx, undefined));
+	pi.on("agent_end", (_event, ctx) => showWorkingGist(ctx, undefined));
 
 	pi.registerCommand("zen", {
 		description: "Toggle zen mode (one row per run)",
@@ -968,6 +1124,8 @@ export default function (pi: ExtensionAPI) {
 			writeZen(zen);
 			rebuild(ctx);
 			applyThinkingLabel(ctx);
+			applyThinkingRow(ctx);
+			showWorkingGist(ctx, undefined);
 			// Redraw every row in place: toggling the expand state twice forces it.
 			try {
 				const expanded = ctx.ui.getToolsExpanded();
@@ -1020,7 +1178,8 @@ export default function (pi: ExtensionAPI) {
 						frame.setCall(component, background(context.isPartial ? 1 : 0, context.isError ? 1 : 0));
 						row = frame;
 					}
-					if (!context.expanded) {
+					// With the hook the chat row above already draws it.
+					if (!context.expanded || useChatRow) {
 						return row;
 					}
 					const state = slots(context);
@@ -1126,6 +1285,7 @@ export default function (pi: ExtensionAPI) {
 
 /** A collapsed thinking row is still a row; zen folds it, and restores it when off. */
 function applyThinkingLabel(ctx: ExtensionContext): void {
+	omitsThinking = zen && ctx.mode === "tui" && piOmitsHiddenThinking();
 	if (ctx.mode !== "tui") {
 		return;
 	}
@@ -1134,7 +1294,7 @@ function applyThinkingLabel(ctx: ExtensionContext): void {
 		return;
 	}
 	// An unpatched pi renders an empty label as a blank row, which is worse than the label.
-	if (piOmitsHiddenThinking()) {
+	if (omitsThinking) {
 		ctx.ui.setHiddenThinkingLabel("");
 		return;
 	}
@@ -1143,6 +1303,19 @@ function applyThinkingLabel(ctx: ExtensionContext): void {
 		warnedAboutPatch = true;
 		ctx.ui.notify("zen: this pi has no thinking-omission patch; run zen-install-pi.sh, then restart pi", "warning");
 	}
+}
+
+/** Hand pi the purple row that replaces omitted thinking, when the installed build has the hook. */
+function applyThinkingRow(ctx: ExtensionContext): void {
+	if (ctx.mode !== "tui") {
+		return;
+	}
+	const ui = ctx.ui as typeof ctx.ui & {
+		setThinkingRow?: (renderer: ThinkingRowRenderer | undefined) => void;
+	};
+	thinkingRowHook = ui.setThinkingRow ? (renderer) => ui.setThinkingRow?.(renderer) : undefined;
+	useChatRow = omitsThinking && thinkingRowHook !== undefined;
+	thinkingRowHook?.(useChatRow ? chatThinkingRow : undefined);
 }
 
 /** Whether the installed pi can drop a hidden thinking row instead of drawing a blank one. */
@@ -1204,6 +1377,8 @@ function watchExpandKey(ctx: ExtensionContext): void {
 
 function rebuild(ctx: ExtensionContext): void {
 	byId.clear();
+	messageEntries = new WeakMap();
+	chatRows = new WeakMap();
 	current = undefined;
 	thinkingId = undefined;
 	for (const entry of ctx.sessionManager.buildContextEntries()) {
@@ -1218,6 +1393,7 @@ function rebuild(ctx: ExtensionContext): void {
 			const thinking = thinkingEntry(`thinking-${++thinkingCount}`);
 			thinking.message = message;
 			thinking.header = { main: thinkingGist(message), suffix: "" };
+			messageEntries.set(message, thinking);
 		}
 		if (!Array.isArray(message.content)) continue;
 		for (const block of message.content as ReadonlyArray<{ type: string; id?: string; name?: string }>) {

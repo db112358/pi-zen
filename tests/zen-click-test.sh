@@ -42,6 +42,11 @@ lines = [
     entry("m3", "m2", {"role": "toolResult", "toolCallId": "call_bash", "toolName": "bash", "content": [{"type": "text", "text": "ZENOUT-one\nZENOUT-two"}], "details": {}, "isError": False, "durationMs": 5, "timestamp": ms}),
     entry("m4", "m3", {"role": "toolResult", "toolCallId": "call_write", "toolName": "write", "content": [{"type": "text", "text": "Wrote /tmp/zen-click.txt"}], "details": {}, "isError": False, "durationMs": 5, "timestamp": ms}),
     entry("m5", "m4", {"role": "assistant", "content": [{"type": "text", "text": "done"}], "api": "openai-responses", "provider": "openai", "model": "gpt-4o-mini", "usage": usage, "stopReason": "stop", "timestamp": ms}),
+    entry("m6", "m5", {"role": "user", "content": [{"type": "text", "text": "second thought"}], "timestamp": ms}),
+    entry("m7", "m6", {"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "Final reasoning.\nZENFINAL detail.", "thinkingSignature": ""},
+        {"type": "text", "text": "ZENFINAL answer."},
+    ], "api": "openai-responses", "provider": "openai", "model": "gpt-4o-mini", "usage": usage, "stopReason": "stop", "timestamp": ms}),
 ]
 open(sys.argv[1], "w").write("\n".join(lines) + "\n")
 PY
@@ -89,6 +94,9 @@ check_row() {
 }
 
 # Clicking the chapter summary row expands the whole chapter into its rows.
+# The chapter has to be on screen: grow the pane so rows added above it cannot push its header out.
+tmux resize-window -t "$NAME" -x 120 -y 90
+sleep 1
 if screen | grep -q "▶"; then
 	echo "ok   collapsed chapter shows the sideways chevron"
 else
@@ -107,16 +115,22 @@ else
 	failures=$((failures + 1))
 fi
 
-# The header folds it back; check now while the header is still on screen.
-header_y="$(row_of "actions")"
-click_row "$header_y"
-sleep 1
-if screen | grep -q "ZENOUT-one"; then
-	echo "FAIL chapter header did not fold the rows"
+# The header folds it back.
+header_y="$(row_of "▼")"
+if [ -z "$header_y" ]; then
+	echo "FAIL opened chapter has no down chevron header"
 	screen
 	failures=$((failures + 1))
 else
-	echo "ok   chapter header folds it back"
+	click_row "$header_y"
+	sleep 1
+	if screen | grep -q "ZENOUT-one"; then
+		echo "FAIL chapter header did not fold the rows"
+		screen
+		failures=$((failures + 1))
+	else
+		echo "ok   chapter header folds it back"
+	fi
 fi
 
 # The footer is the same fold target at the end of the list, where a long chapter is read.
@@ -166,6 +180,15 @@ check_row "write row opens" "^ *write /tmp/zen-click.txt" "ZENWRITEOUT-1"
 tmux send-keys -t "$NAME" -l "/reload"
 tmux send-keys -t "$NAME" Enter
 sleep 5
+# A run with no tool call keeps its purple thinking row through the rebuild.
+if [ -z "$(row_of "thinking Final reasoning.")" ]; then
+	echo "FAIL tool-less thinking row not on screen after /reload"
+	screen
+	failures=$((failures + 1))
+else
+	check_row "tool-less thinking row opens" "thinking Final reasoning." "ZENFINAL detail."
+fi
+
 reload_y="$(row_of "actions")"
 click_row "$reload_y"
 sleep 1
