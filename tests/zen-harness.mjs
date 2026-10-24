@@ -717,5 +717,45 @@ check(
 // Back to a pi without the hook: the working line carries the gist again.
 handlers.get("session_start")({}, ctx);
 
+// ---------------------------------------------------------------------------
+// Scenario 18: rows crossing a session replacement must not touch the old ctx.
+let stale = false;
+const staleError = "stale extension ctx";
+const replacementCtx = {
+	get mode() {
+		if (stale) throw new Error(staleError);
+		return "tui";
+	},
+	get ui() {
+		if (stale) throw new Error(staleError);
+		return ui;
+	},
+	sessionManager,
+	hasUI: true,
+};
+handlers.get("session_start")({}, replacementCtx);
+expandedTools = true;
+startAssistant();
+const staleMsg = assistant([
+	{ type: "thinking", thinking: "Plan before the row." },
+	{ type: "toolCall", id: "call-stale", name: "read", arguments: { file_path: "/tmp/stale.ts" } },
+]);
+update(staleMsg);
+const staleRead = pi.resolver("read", () => undefined);
+const staleCtx = context({ toolCallId: "call-stale", args: { file_path: "/tmp/stale.ts" }, expanded: true });
+const staleRow = staleRead.renderCall({ file_path: "/tmp/stale.ts" }, theme, staleCtx);
+staleRead.renderResult({ content: [], details: {}, isError: false }, { expanded: true, isPartial: false }, theme, staleCtx);
+check("row renders before the ctx goes stale", flat(staleRow.render(80)).includes("Plan before the row"), flat(staleRow.render(80)));
+stale = true;
+let staleFailure;
+let afterReplacement = [];
+try {
+	afterReplacement = staleRow.render(80);
+} catch (error) {
+	staleFailure = error;
+}
+check("row still renders after the ctx goes stale", staleFailure === undefined, String(staleFailure));
+check("row keeps its thinking after the ctx goes stale", flat(afterReplacement).includes("Plan before the row"), flat(afterReplacement));
+
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);
