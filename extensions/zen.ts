@@ -1080,7 +1080,9 @@ function trackThinking(message: MaybeMessage, ctx: ExtensionContext): void {
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		zen = readZen();
-		expandedAll = ctx.mode === "tui" ? () => ctx.ui.getToolsExpanded() : () => false;
+		// Renders may outlive the ctx; the ui object does not go stale.
+		const ui = ctx.mode === "tui" ? ctx.ui : undefined;
+		expandedAll = ui ? () => ui.getToolsExpanded() : () => false;
 		rebuild(ctx);
 		applyThinkingLabel(ctx);
 		applyThinkingRow(ctx);
