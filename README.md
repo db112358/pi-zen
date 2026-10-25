@@ -49,8 +49,9 @@ cd pi-zen
 ## Layout
 
 ```
-extensions/zen.ts         the extension: chapters, rows, tool renderers
+extensions/zen.ts         the extension: settings, lifecycle and tool renderers
 extensions/lib/format.ts  pure formatting: action lines, result summaries, thinking text
+extensions/lib/model.ts   the chapter model: entries, grouping, shared maps, rebuild
 scripts/                  fork install and patch helpers
 tests/zen-harness.mjs     component-level checks (fake pi, no terminal)
 tests/zen-real-test.mjs   smoke test against the installed builtin renderers
