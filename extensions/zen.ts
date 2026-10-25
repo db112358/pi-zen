@@ -80,7 +80,7 @@ interface Run {
 }
 
 const byId = new Map<string, Entry>();
-/** Redraw callbacks by tool call id; kept across rebuilds, which replace the entries. */
+/** Redraw callbacks by tool call id; a rebuild prunes the ids it did not keep. */
 const invalidators = new Map<string, () => void>();
 let current: Run | undefined;
 let zen = true;
@@ -1179,10 +1179,7 @@ export default function (pi: ExtensionAPI) {
 		// Renders may outlive the ctx; the ui object does not go stale.
 		const ui = ctx.mode === "tui" ? ctx.ui : undefined;
 		expandedAll = ui ? () => ui.getToolsExpanded() : () => false;
-		rebuild(ctx);
-		applyThinkingLabel(ctx);
-		applyThinkingRow(ctx);
-		showWorkingGist(ctx, undefined);
+		applyZenUI(ctx);
 		watchExpandKey(ctx);
 	});
 
@@ -1220,21 +1217,8 @@ export default function (pi: ExtensionAPI) {
 			const wanted = args.trim().toLowerCase();
 			zen = wanted === "on" ? true : wanted === "off" ? false : !zen;
 			writeZen(zen);
-			rebuild(ctx);
-			applyThinkingLabel(ctx);
-			applyThinkingRow(ctx);
-			showWorkingGist(ctx, undefined);
-			// Redraw every row in place: toggling the expand state twice forces it.
-			try {
-				const expanded = ctx.ui.getToolsExpanded();
-				ctx.ui.setToolsExpanded(!expanded);
-				ctx.ui.setToolsExpanded(expanded);
-				// Writing a status is the only available nudge for a redraw; clearing one
-				// leaves the footer untouched.
-				ctx.ui.setStatus("zen", undefined);
-			} catch {
-				// No interactive UI: the setting still applies to the next session.
-			}
+			applyZenUI(ctx);
+			nudgeRedraw(ctx);
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Zen mode ${zen ? "on — one row per run" : "off — pi's own rendering"}`, "info");
 			}
@@ -1397,7 +1381,28 @@ function piOmitsHiddenThinking(): boolean {
 	}
 }
 
-/** Group the stored actions the way the transcript would have grouped them live. */
+/** Rebuild the model and apply zen's rendering to the live UI. */
+function applyZenUI(ctx: ExtensionContext): void {
+	rebuild(ctx);
+	applyThinkingLabel(ctx);
+	applyThinkingRow(ctx);
+	showWorkingGist(ctx, undefined);
+}
+
+/** Redraw every row in place: toggling the expand state twice forces it. */
+function nudgeRedraw(ctx: ExtensionContext): void {
+	try {
+		const expanded = ctx.ui.getToolsExpanded();
+		ctx.ui.setToolsExpanded(!expanded);
+		ctx.ui.setToolsExpanded(expanded);
+		// Writing a status is the only available nudge for a redraw; clearing one
+		// leaves the footer untouched.
+		ctx.ui.setStatus("zen", undefined);
+	} catch {
+		// No interactive UI: the setting still applies to the next session.
+	}
+}
+
 /** Chapters opened by hand, so one key can fold all of them. */
 function openRuns(): Run[] {
 	const open = new Set<Run>();
@@ -1418,7 +1423,9 @@ function watchExpandKey(ctx: ExtensionContext): void {
 		return;
 	}
 	stopExpandKey?.();
-	stopExpandKey = ctx.ui.onTerminalInput((data) => {
+	// The listener can outlive the ctx; the ui object does not go stale.
+	const ui = ctx.ui;
+	stopExpandKey = ui.onTerminalInput((data) => {
 		if (!zen || !getKeybindings().matches(data, "app.tools.expand")) {
 			return undefined;
 		}
@@ -1431,12 +1438,13 @@ function watchExpandKey(ctx: ExtensionContext): void {
 			refreshRun(run);
 		}
 		if (expandedAll()) {
-			ctx.ui.setToolsExpanded(false);
+			ui.setToolsExpanded(false);
 		}
 		return { consume: true };
 	});
 }
 
+/** Group the stored actions the way the transcript would have grouped them live. */
 function rebuild(ctx: ExtensionContext): void {
 	byId.clear();
 	messageEntries = new WeakMap();
@@ -1461,6 +1469,12 @@ function rebuild(ctx: ExtensionContext): void {
 			if (block.type === "toolCall" && typeof block.id === "string") {
 				toolEntry(block.id, narrative(block.name ?? ""));
 			}
+		}
+	}
+	// Redraw callbacks follow entries; drop the ids the rebuild did not keep.
+	for (const id of invalidators.keys()) {
+		if (!byId.has(id)) {
+			invalidators.delete(id);
 		}
 	}
 }
