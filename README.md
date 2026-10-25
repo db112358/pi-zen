@@ -49,11 +49,12 @@ cd pi-zen
 ## Layout
 
 ```
-extensions/zen.ts       the extension
-scripts/                fork install and patch helpers
-tests/zen-harness.mjs   component-level checks (fake pi, no terminal)
-tests/zen-real-test.mjs smoke test against the installed builtin renderers
-tests/zen-click-test.sh end-to-end: real pi under tmux with injected SGR mouse events
+extensions/zen.ts         the extension: chapters, rows, tool renderers
+extensions/lib/format.ts  pure formatting: action lines, result summaries, thinking text
+scripts/                  fork install and patch helpers
+tests/zen-harness.mjs     component-level checks (fake pi, no terminal)
+tests/zen-real-test.mjs   smoke test against the installed builtin renderers
+tests/zen-click-test.sh   end-to-end: real pi under tmux with injected SGR mouse events
 ```
 
 ## Tests
