@@ -38,7 +38,7 @@ import {
 	toolEntry,
 	type Background,
 	type Chapter,
-	type Entry,
+	type ToolEntry,
 } from "./lib/model";
 
 type Context = Parameters<NonNullable<ToolRenderers["renderCall"]>>[2];
@@ -225,12 +225,12 @@ interface NativeAction {
 }
 
 /** Whether the open row shows the tool's own call and result in place of the zen action line. */
-function showsNative(entry: Entry): boolean {
+function showsNative(entry: ToolEntry): boolean {
 	return entry.open === true && rowsShown(entry.chapter);
 }
 
 /** The tool's own call and result, once the call slot has built them. */
-function nativeAction(context: Context, entry: Entry): NativeAction | undefined {
+function nativeAction(context: Context, entry: ToolEntry): NativeAction | undefined {
 	const state = slots(context);
 	return showsNative(entry) && state.nativeCall
 		? { call: state.nativeCall, result: state.nativeResult, selfFramed: state.nativeSelfFramed === true }
@@ -238,7 +238,7 @@ function nativeAction(context: Context, entry: Entry): NativeAction | undefined 
 }
 
 /** The action row's frame: the action line, or the tool's own row while it is open. */
-function actionFrame(context: Context, theme: Theme, entry: Entry): Box {
+function actionFrame(context: Context, theme: Theme, entry: ToolEntry): Box {
 	const state = slots(context);
 	state.frame ??= new Box(context.outputPad, 1);
 	const frame = state.frame;
@@ -315,7 +315,7 @@ function restack(container: Container, children: Component[]): Container {
 }
 
 /** One tool row expanded: thinking above in the call slot, thinking after in the result slot. */
-function expandedRow(context: Context, theme: Theme, entry: Entry, top: boolean): Component {
+function expandedRow(context: Context, theme: Theme, entry: ToolEntry, top: boolean): Component {
 	const state = slots(context);
 	if (!top) {
 		state.expandedAfter ??= new ThinkingRows(entry.id, theme, context.outputPad, true, () => context.invalidate());

@@ -246,6 +246,7 @@ runTable("entryLine — the width budget", [
 	{ name: "a long suffix is kept whole", actual: () => { const line = entryLine(styledEntry("x".repeat(100), "", " (+4999 lines)"), theme, 20); return [strip(line), visibleWidth(line)]; }, expect: ["xxxxx… (+4999 lines)", 20] },
 	{ name: "the suffix is never cut, even past the budget", actual: () => { const line = entryLine(styledEntry("cmd", "", " (+4999 lines)"), theme, 10); return [strip(line), visibleWidth(line)]; }, expect: ["… (+4999 lines)", 15] },
 	{ name: "a thinking row is led by its label", actual: () => { const line = entryLine(styledEntry("Plan", "", "", { kind: "thinking" }), theme, 20); return [strip(line), visibleWidth(line)]; }, expect: ["thinking Plan", 13] },
+	{ name: "a thinking row carries no outcome", actual: () => strip(entryLine(styledEntry("Plan", "3 lines", "", { kind: "thinking" }), theme, 20)), expect: "thinking Plan" },
 	{ name: "no result means no separator", actual: () => strip(entryLine(styledEntry("bash"), theme, 20)), expect: "bash" },
 ]);
 
