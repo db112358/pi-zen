@@ -17,7 +17,9 @@ if not test -e $repo/node_modules
 end
 
 mkdir -p $ext_dir
-for f in extensions/zen.ts scripts/zen-install-pi.sh scripts/zen-patch-pi.sh
+# Pi treats every top-level extensions/*.ts as an extension but skips a subdirectory with
+# no index.ts, so the modules the extension imports are symlinked wholesale.
+for f in extensions/*.ts extensions/lib scripts/zen-install-pi.sh scripts/zen-patch-pi.sh
     set -l target $ext_dir/(basename $f)
     if test -f $target; and not test -L $target
         mv $target $target.bak
