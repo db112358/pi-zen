@@ -16,12 +16,39 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { Box, Container, getKeybindings, MouseRegion, Spacer, Text, truncateToWidth, visibleWidth, type Component, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
-import { actionHeader, blocksOf, fallbackCall, outputLines, resultSummary, thinkingGist, thinkingText, type ActionHeader, type MaybeMessage } from "./lib/format";
+import { actionHeader, blocksOf, fallbackCall, outputLines, resultSummary, thinkingText, type MaybeMessage } from "./lib/format";
+import {
+	background,
+	beginThinking,
+	byId,
+	chapterBackground,
+	endChapter,
+	entryForMessage,
+	expandedAll,
+	firstToolOf,
+	foldThinking,
+	invalidators,
+	isChapterRow,
+	lastEntry,
+	narrative,
+	openChapters,
+	rebuild as rebuildModel,
+	refreshChapter,
+	rowsShown,
+	setExpandedAll,
+	takingOver,
+	tally,
+	thinkingAfter,
+	thinkingBefore,
+	toolEntry,
+	type Background,
+	type Chapter,
+	type Entry,
+} from "./lib/model";
 
 type Context = Parameters<NonNullable<ToolRenderers["renderCall"]>>[2];
 type Result = Parameters<NonNullable<ToolRenderers["renderResult"]>>[0];
 type ResultOptions = Parameters<NonNullable<ToolRenderers["renderResult"]>>[1];
-type Background = "toolPendingBg" | "toolErrorBg" | "toolSuccessBg";
 
 /** pi's `setThinkingRow` shape, so zen loads against a build without the hook. */
 type ThinkingRowRenderer = (
@@ -35,47 +62,7 @@ const FALLBACK_LINES = 10;
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const STATE_FILE = join(AGENT_DIR, "extensions", "zen.json");
 
-/** Tools that head a chapter and keep their own row: their result is the narrative. */
-const NARRATIVE = new Set(["set_andon"]);
-
-/** One action: a tool call or a thinking block. */
-interface Entry {
-	id: string;
-	kind: "tool" | "thinking";
-	/** Chapter this entry belongs to; a narrative row stands alone. */
-	chapter: Chapter | undefined;
-	/** One line, styled: the part that may be cut, and the suffix that should survive. */
-	actionHeader: ActionHeader;
-	/** Styled result summary, tools only. */
-	resultSummary: string;
-	/** Whether the row shows its thinking in full rather than as a one-line gist. */
-	open?: boolean;
-	/** Narrative rows never take a thinking row over. */
-	narrative?: boolean;
-	/** Message the thinking came from, thinking only; the detail is read from it at render time. */
-	message?: MaybeMessage;
-	done: boolean;
-	error: boolean;
-}
-
-/** Everything since the last user message or narrative row, drawn as one row. */
-interface Chapter {
-	entries: Entry[];
-	/** Newest tool row; kept here so the chapter check stays O(1). */
-	lastTool?: Entry;
-	/** Whether this chapter alone is expanded into its rows, outside ctrl+o. */
-	open?: boolean;
-}
-
-const byId = new Map<string, Entry>();
-/** Redraw callbacks by tool call id; a rebuild prunes the ids it did not keep. */
-const invalidators = new Map<string, () => void>();
-let current: Chapter | undefined;
 let zen = true;
-let thinkingId: string | undefined;
-let thinkingCount = 0;
-/** Whether the transcript shows tool output expanded, as opposed to one clicked row. */
-let expandedAll = (): boolean => false;
 /** Thinking gist on the working line, while the chapter has no row to draw it on. */
 let workingGist: string | undefined;
 /** Whether pi omits thinking, and whether zen draws the row in its place. */
@@ -83,141 +70,11 @@ let omitsThinking = false;
 let useChatRow = false;
 /** pi's `setThinkingRow`, when the installed build has one. */
 let thinkingRowHook: ((renderer: ThinkingRowRenderer | undefined) => void) | undefined;
-/** A message's thinking entry, so its chat row finds it after streaming. */
-let messageEntries = new WeakMap<object, Entry>();
 /** One purple row per message, kept across the rebuild every delta causes. */
 let chatRows = new WeakMap<object, { pad: number; row: ChatThinkingRow }>();
 /** Detaches the terminal-input listener that makes ctrl+o fold before it expands. */
 let stopExpandKey: (() => void) | undefined;
 let warnedAboutPatch = false;
-
-function narrative(toolName: string): boolean {
-	return NARRATIVE.has(toolName);
-}
-
-/** Whether a chapter's rows are shown: every chapter expanded, or this one opened on its own. */
-function rowsShown(chapter: Chapter | undefined): boolean {
-	return expandedAll() || chapter?.open === true;
-}
-
-function firstToolOf(chapter: Chapter): Entry | undefined {
-	return chapter.entries.find((entry) => entry.kind === "tool");
-}
-
-/** Redraw every row of a chapter after its open state changed. */
-function refreshChapter(chapter: Chapter): void {
-	for (const entry of chapter.entries) {
-		invalidators.get(entry.id)?.();
-	}
-}
-
-function toolEntry(toolCallId: string, standalone: boolean): Entry {
-	const existing = byId.get(toolCallId);
-	if (existing) {
-		return existing;
-	}
-	const entry: Entry = { id: toolCallId, kind: "tool", chapter: undefined, actionHeader: { main: "", suffix: "" }, resultSummary: "", done: false, error: false, narrative: standalone };
-	if (standalone) {
-		// A narrative row heads its own chapter and takes the thinking that led to it, which
-		// otherwise would only have the chat row to draw it.
-		const chapter: Chapter = { entries: [] };
-		entry.chapter = chapter;
-		if (current) {
-			let split = current.entries.length;
-			while (split > 0 && current.entries[split - 1].kind === "thinking") {
-				split--;
-			}
-			for (const pending of current.entries.splice(split)) {
-				pending.chapter = chapter;
-				chapter.entries.push(pending);
-			}
-		}
-		chapter.entries.push(entry);
-		chapter.lastTool = entry;
-		current = undefined;
-	} else {
-		const chapter = (current ??= { entries: [] });
-		entry.chapter = chapter;
-		chapter.entries.push(entry);
-		// Move the marker first: the old row must redraw without the footer.
-		const previous = chapter.lastTool;
-		chapter.lastTool = entry;
-		if (previous) invalidators.get(previous.id)?.();
-	}
-	byId.set(toolCallId, entry);
-	return entry;
-}
-
-function thinkingEntry(id: string): Entry {
-	const existing = byId.get(id);
-	if (existing) {
-		return existing;
-	}
-	const chapter = (current ??= { entries: [] });
-	const entry: Entry = { id, kind: "thinking", chapter, actionHeader: { main: "", suffix: "" }, resultSummary: "", done: true, error: false };
-	chapter.entries.push(entry);
-	byId.set(id, entry);
-	return entry;
-}
-
-function lastEntry(chapter: Chapter): Entry | undefined {
-	return chapter.entries[chapter.entries.length - 1];
-}
-
-/** The tool that has taken a chapter's thinking over; narrative rows never do. */
-function takingOver(chapter: Chapter | undefined): Entry | undefined {
-	const last = chapter?.lastTool;
-	return last?.narrative ? undefined : last;
-}
-
-/** Only the newest tool row of a chapter draws the chapter, so the rest fold away. */
-function isChapterRow(entry: Entry): boolean {
-	return entry.kind === "tool" && entry.chapter?.lastTool === entry;
-}
-
-/** Thinking drawn above a tool row: the blocks that came since the previous tool. */
-function thinkingBefore(chapter: Chapter, entry: Entry): Entry[] {
-	const index = chapter.entries.indexOf(entry);
-	const out: Entry[] = [];
-	for (let i = index - 1; i >= 0 && chapter.entries[i].kind === "thinking"; i--) {
-		out.unshift(chapter.entries[i]);
-	}
-	return out;
-}
-
-/** Thinking with no tool after it hangs below the chapter's last tool row. */
-function thinkingAfter(chapter: Chapter, entry: Entry): Entry[] {
-	if (!isChapterRow(entry)) {
-		return [];
-	}
-	const index = chapter.entries.indexOf(entry);
-	const out: Entry[] = [];
-	for (let i = index + 1; i < chapter.entries.length && chapter.entries[i].kind === "thinking"; i++) {
-		out.push(chapter.entries[i]);
-	}
-	return out;
-}
-
-function tally(chapter: Chapter): { pending: number; failed: number } {
-	let pending = 0;
-	let failed = 0;
-	for (const entry of chapter.entries) {
-		if (!entry.done) pending++;
-		if (entry.error) failed++;
-	}
-	return { pending, failed };
-}
-
-function background(pending: number, failed: number): Background {
-	if (pending > 0) return "toolPendingBg";
-	return failed > 0 ? "toolErrorBg" : "toolSuccessBg";
-}
-
-/** A chapter takes its colour from its latest result; failures it recovered from stay counted. */
-function chapterBackground(chapter: Chapter): Background {
-	if (chapter.entries.some((entry) => !entry.done)) return "toolPendingBg";
-	return chapter.lastTool?.error ? "toolErrorBg" : "toolSuccessBg";
-}
 
 function expandHint(): string {
 	const keys = getKeybindings().getKeys("app.tools.expand");
@@ -409,13 +266,6 @@ function foldLine(chapter: Chapter, theme: Theme, width: number, open: boolean):
 	const line = `${theme.fg("muted", open ? "▼" : "▲")} ${parts.join(separator)}`;
 	const hint = theme.fg("dim", expandHint());
 	return visibleWidth(line) + visibleWidth(separator) + visibleWidth(hint) <= width ? line + separator + hint : line;
-}
-
-/** Whether a message carries thinking worth a row. */
-function hasThinking(message: MaybeMessage): boolean {
-	return blocksOf(message).some(
-		(block) => block.type === "thinking" && typeof block.thinking === "string" && /\S/.test(block.thinking),
-	);
 }
 
 /** Whether a message carries a tool call: the action that will draw its thinking. */
@@ -760,7 +610,7 @@ function chatThinkingRow(
 	options: { expanded: boolean; outputPad: number },
 	theme: Theme,
 ): Component | undefined {
-	const entry = messageEntries.get(message);
+	const entry = entryForMessage(message);
 	if (!zen || !entry || takingOver(entry.chapter) || carriesChapterToolCall(message)) {
 		return undefined;
 	}
@@ -929,17 +779,12 @@ function fallbackResult(result: Result, options: { expanded: boolean }, theme: T
 	return new Text(outputBody(shown, theme) + rest, 0, 0);
 }
 
-/** Fold a message's thinking into the chapter, as the action that is running now. */
+/** Fold a message's thinking into the chapter and keep the working line in step. */
 function trackThinking(message: MaybeMessage, ctx: ExtensionContext): void {
-	if (message.role !== "assistant" || !thinkingId || !hasThinking(message)) {
+	const entry = foldThinking(message);
+	if (!entry) {
 		return;
 	}
-	const entry = thinkingEntry(thinkingId);
-	// Keep the message: the detail is read from it at render time, so a long block costs
-	// one first-line scan per delta instead of rebuilding the whole text.
-	entry.message = message;
-	entry.actionHeader = { main: thinkingGist(message), suffix: "" };
-	messageEntries.set(message, entry);
 	// A later message trails a chapter row that draws its thinking; with the hook pi draws the row itself.
 	const carried =
 		zen && omitsThinking && !useChatRow && !entry.chapter?.lastTool && thinkingOnly(message) ? entry.actionHeader.main : "";
@@ -951,7 +796,7 @@ export default function (pi: ExtensionAPI) {
 		zen = readZen();
 		// Renders may outlive the ctx; the ui object does not go stale.
 		const ui = ctx.mode === "tui" ? ctx.ui : undefined;
-		expandedAll = ui ? () => ui.getToolsExpanded() : () => false;
+		setExpandedAll(ui ? () => ui.getToolsExpanded() : () => false);
 		applyZenUI(ctx);
 		watchExpandKey(ctx);
 	});
@@ -969,12 +814,11 @@ export default function (pi: ExtensionAPI) {
 	pi.on("message_start", (event) => {
 		// The user's message opens a chapter; an assistant message opens a thinking block.
 		if (event.message.role === "user") {
-			current = undefined;
-			thinkingId = undefined;
+			endChapter();
 			return;
 		}
 		if (event.message.role === "assistant") {
-			thinkingId = `thinking-${++thinkingCount}`;
+			beginThinking();
 		}
 	});
 
@@ -1176,17 +1020,6 @@ function nudgeRedraw(ctx: ExtensionContext): void {
 	}
 }
 
-/** Chapters opened by hand, so one key can fold all of them. */
-function openChapters(): Chapter[] {
-	const open = new Set<Chapter>();
-	for (const entry of byId.values()) {
-		if (entry.chapter?.open === true) {
-			open.add(entry.chapter);
-		}
-	}
-	return [...open];
-}
-
 /**
  * ctrl+o folds what is open before it expands: with a chapter open, the key meant to hide it would
  * otherwise expand every chapter. Nothing opened by hand leaves the key to the core toggle.
@@ -1217,39 +1050,10 @@ function watchExpandKey(ctx: ExtensionContext): void {
 	});
 }
 
-/** Rebuild the chapters the way the transcript grouped them live. */
+/** Rebuild the model; the chat rows go with the messages a tree jump replaces. */
 function rebuild(ctx: ExtensionContext): void {
-	byId.clear();
-	messageEntries = new WeakMap();
+	rebuildModel(ctx);
 	chatRows = new WeakMap();
-	current = undefined;
-	thinkingId = undefined;
-	for (const entry of ctx.sessionManager.buildContextEntries()) {
-		if (entry.type !== "message") continue;
-		const message = entry.message;
-		if (message.role === "user") {
-			current = undefined;
-			continue;
-		}
-		if (message.role !== "assistant") continue;
-		if (hasThinking(message)) {
-			const thinking = thinkingEntry(`thinking-${++thinkingCount}`);
-			thinking.message = message;
-			thinking.actionHeader = { main: thinkingGist(message), suffix: "" };
-			messageEntries.set(message, thinking);
-		}
-		for (const block of blocksOf(message)) {
-			if (block.type === "toolCall" && typeof block.id === "string") {
-				toolEntry(block.id, narrative(block.name ?? ""));
-			}
-		}
-	}
-	// Redraw callbacks follow entries; drop the ids the rebuild did not keep.
-	for (const id of invalidators.keys()) {
-		if (!byId.has(id)) {
-			invalidators.delete(id);
-		}
-	}
 }
 
 function readZen(): boolean {
