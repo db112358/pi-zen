@@ -1,5 +1,5 @@
 /**
- * Zen mode: one row per run.
+ * Zen mode: one row per chapter.
  *
  * Tool calls and thinking fold into a single row that follows the latest
  * action, so a long turn cannot bury the conversation in command output.
@@ -29,8 +29,8 @@ type ThinkingRowRenderer = (
 	theme: Theme,
 ) => Component | undefined;
 
-const HEADER_CHARS = 100;
-const SUMMARY_CHARS = 120;
+const ACTION_HEADER_CHARS = 100;
+const RESULT_SUMMARY_CHARS = 120;
 /** A command is kept whole so the row can use whatever width it has; only absurd lines are cut. */
 const COMMAND_CHARS = 400;
 /** Lines a collapsed fallback row shows. */
@@ -38,14 +38,14 @@ const FALLBACK_LINES = 10;
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const STATE_FILE = join(AGENT_DIR, "extensions", "zen.json");
 
-/** Tools that already hide their whole result when collapsed, so a summary would only add noise. */
+/** Tools that already hide their whole result when collapsed, so a result summary would only add noise. */
 const HEADER_ONLY = new Set(["read", "write"]);
 
 /** Tools that head a chapter and keep their own row: their result is the narrative. */
 const NARRATIVE = new Set(["set_andon"]);
 
-/** A header in two parts, so a width budget can cut the text and keep the structure. */
-interface Header {
+/** An action header in two parts, so a width budget can cut the text and keep the structure. */
+interface ActionHeader {
 	main: string;
 	suffix: string;
 }
@@ -55,11 +55,11 @@ interface Entry {
 	id: string;
 	kind: "tool" | "thinking";
 	/** Chapter this entry belongs to; a narrative row stands alone. */
-	run: Run | undefined;
+	chapter: Chapter | undefined;
 	/** One line, styled: the part that may be cut, and the suffix that should survive. */
-	header: Header;
+	actionHeader: ActionHeader;
 	/** Styled result summary, tools only. */
-	summary: string;
+	resultSummary: string;
 	/** Whether the row shows its thinking in full rather than as a one-line gist. */
 	open?: boolean;
 	/** Narrative rows never take a thinking row over. */
@@ -71,24 +71,24 @@ interface Entry {
 }
 
 /** Everything since the last user message or narrative row, drawn as one row. */
-interface Run {
+interface Chapter {
 	entries: Entry[];
 	/** Newest tool row; kept here so the chapter check stays O(1). */
 	lastTool?: Entry;
-	/** Whether this chapter alone is expanded into its rows, outside the ctrl+o list. */
+	/** Whether this chapter alone is expanded into its rows, outside ctrl+o. */
 	open?: boolean;
 }
 
 const byId = new Map<string, Entry>();
 /** Redraw callbacks by tool call id; a rebuild prunes the ids it did not keep. */
 const invalidators = new Map<string, () => void>();
-let current: Run | undefined;
+let current: Chapter | undefined;
 let zen = true;
 let thinkingId: string | undefined;
 let thinkingCount = 0;
 /** Whether the transcript shows tool output expanded, as opposed to one clicked row. */
 let expandedAll = (): boolean => false;
-/** Thinking gist on the working line, while the run has no row to draw it on. */
+/** Thinking gist on the working line, while the chapter has no row to draw it on. */
 let workingGist: string | undefined;
 /** Whether pi omits thinking, and whether zen draws the row in its place. */
 let omitsThinking = false;
@@ -107,18 +107,18 @@ function narrative(toolName: string): boolean {
 	return NARRATIVE.has(toolName);
 }
 
-/** Whether rows are shown: the ctrl+o list, or one chapter opened on its own. */
-function listMode(run: Run | undefined): boolean {
-	return expandedAll() || run?.open === true;
+/** Whether a chapter's rows are shown: every chapter expanded, or this one opened on its own. */
+function rowsShown(chapter: Chapter | undefined): boolean {
+	return expandedAll() || chapter?.open === true;
 }
 
-function firstToolOf(run: Run): Entry | undefined {
-	return run.entries.find((entry) => entry.kind === "tool");
+function firstToolOf(chapter: Chapter): Entry | undefined {
+	return chapter.entries.find((entry) => entry.kind === "tool");
 }
 
 /** Redraw every row of a chapter after its open state changed. */
-function refreshRun(run: Run): void {
-	for (const entry of run.entries) {
+function refreshChapter(chapter: Chapter): void {
+	for (const entry of chapter.entries) {
 		invalidators.get(entry.id)?.();
 	}
 }
@@ -128,32 +128,32 @@ function toolEntry(toolCallId: string, standalone: boolean): Entry {
 	if (existing) {
 		return existing;
 	}
-	const entry: Entry = { id: toolCallId, kind: "tool", run: undefined, header: { main: "", suffix: "" }, summary: "", done: false, error: false, narrative: standalone };
+	const entry: Entry = { id: toolCallId, kind: "tool", chapter: undefined, actionHeader: { main: "", suffix: "" }, resultSummary: "", done: false, error: false, narrative: standalone };
 	if (standalone) {
 		// A narrative row heads its own chapter and takes the thinking that led to it, which
 		// otherwise would only have the chat row to draw it.
-		const run: Run = { entries: [] };
-		entry.run = run;
+		const chapter: Chapter = { entries: [] };
+		entry.chapter = chapter;
 		if (current) {
 			let split = current.entries.length;
 			while (split > 0 && current.entries[split - 1].kind === "thinking") {
 				split--;
 			}
 			for (const pending of current.entries.splice(split)) {
-				pending.run = run;
-				run.entries.push(pending);
+				pending.chapter = chapter;
+				chapter.entries.push(pending);
 			}
 		}
-		run.entries.push(entry);
-		run.lastTool = entry;
+		chapter.entries.push(entry);
+		chapter.lastTool = entry;
 		current = undefined;
 	} else {
-		const run = (current ??= { entries: [] });
-		entry.run = run;
-		run.entries.push(entry);
+		const chapter = (current ??= { entries: [] });
+		entry.chapter = chapter;
+		chapter.entries.push(entry);
 		// Move the marker first: the old row must redraw without the footer.
-		const previous = run.lastTool;
-		run.lastTool = entry;
+		const previous = chapter.lastTool;
+		chapter.lastTool = entry;
 		if (previous) invalidators.get(previous.id)?.();
 	}
 	byId.set(toolCallId, entry);
@@ -165,55 +165,55 @@ function thinkingEntry(id: string): Entry {
 	if (existing) {
 		return existing;
 	}
-	const run = (current ??= { entries: [] });
-	const entry: Entry = { id, kind: "thinking", run, header: { main: "", suffix: "" }, summary: "", done: true, error: false };
-	run.entries.push(entry);
+	const chapter = (current ??= { entries: [] });
+	const entry: Entry = { id, kind: "thinking", chapter, actionHeader: { main: "", suffix: "" }, resultSummary: "", done: true, error: false };
+	chapter.entries.push(entry);
 	byId.set(id, entry);
 	return entry;
 }
 
-function lastEntry(run: Run): Entry | undefined {
-	return run.entries[run.entries.length - 1];
+function lastEntry(chapter: Chapter): Entry | undefined {
+	return chapter.entries[chapter.entries.length - 1];
 }
 
-/** The tool that has taken a run's thinking over; narrative rows never do. */
-function takingOver(run: Run | undefined): Entry | undefined {
-	const last = run?.lastTool;
+/** The tool that has taken a chapter's thinking over; narrative rows never do. */
+function takingOver(chapter: Chapter | undefined): Entry | undefined {
+	const last = chapter?.lastTool;
 	return last?.narrative ? undefined : last;
 }
 
 /** Only the newest tool row of a chapter draws the chapter, so the rest fold away. */
 function isChapterRow(entry: Entry): boolean {
-	return entry.kind === "tool" && entry.run?.lastTool === entry;
+	return entry.kind === "tool" && entry.chapter?.lastTool === entry;
 }
 
 /** Thinking drawn above a tool row: the blocks that came since the previous tool. */
-function thinkingBefore(run: Run, entry: Entry): Entry[] {
-	const index = run.entries.indexOf(entry);
+function thinkingBefore(chapter: Chapter, entry: Entry): Entry[] {
+	const index = chapter.entries.indexOf(entry);
 	const out: Entry[] = [];
-	for (let i = index - 1; i >= 0 && run.entries[i].kind === "thinking"; i--) {
-		out.unshift(run.entries[i]);
+	for (let i = index - 1; i >= 0 && chapter.entries[i].kind === "thinking"; i--) {
+		out.unshift(chapter.entries[i]);
 	}
 	return out;
 }
 
 /** Thinking with no tool after it hangs below the chapter's last tool row. */
-function thinkingAfter(run: Run, entry: Entry): Entry[] {
+function thinkingAfter(chapter: Chapter, entry: Entry): Entry[] {
 	if (!isChapterRow(entry)) {
 		return [];
 	}
-	const index = run.entries.indexOf(entry);
+	const index = chapter.entries.indexOf(entry);
 	const out: Entry[] = [];
-	for (let i = index + 1; i < run.entries.length && run.entries[i].kind === "thinking"; i++) {
-		out.push(run.entries[i]);
+	for (let i = index + 1; i < chapter.entries.length && chapter.entries[i].kind === "thinking"; i++) {
+		out.push(chapter.entries[i]);
 	}
 	return out;
 }
 
-function tally(run: Run): { pending: number; failed: number } {
+function tally(chapter: Chapter): { pending: number; failed: number } {
 	let pending = 0;
 	let failed = 0;
-	for (const entry of run.entries) {
+	for (const entry of chapter.entries) {
 		if (!entry.done) pending++;
 		if (entry.error) failed++;
 	}
@@ -226,9 +226,9 @@ function background(pending: number, failed: number): Background {
 }
 
 /** A chapter takes its colour from its latest result; failures it recovered from stay counted. */
-function runBackground(run: Run): Background {
-	if (run.entries.some((entry) => !entry.done)) return "toolPendingBg";
-	return run.lastTool?.error ? "toolErrorBg" : "toolSuccessBg";
+function chapterBackground(chapter: Chapter): Background {
+	if (chapter.entries.some((entry) => !entry.done)) return "toolPendingBg";
+	return chapter.lastTool?.error ? "toolErrorBg" : "toolSuccessBg";
 }
 
 function expandHint(): string {
@@ -243,21 +243,21 @@ function expandHint(): string {
 function entryLine(entry: Entry, theme: Theme, budget: number): string {
 	const separator = theme.fg("muted", " · ");
 	const lead = entry.kind === "thinking" ? `${theme.fg("toolTitle", theme.bold("thinking"))} ` : "";
-	let { main } = entry.header;
-	const { suffix } = entry.header;
-	let summary = entry.summary;
+	let { main } = entry.actionHeader;
+	const { suffix } = entry.actionHeader;
+	let resultSummary = entry.resultSummary;
 	const leadWidth = visibleWidth(lead);
-	const room = Math.max(1, budget - leadWidth - visibleWidth(suffix) - (summary ? visibleWidth(separator) : 0));
+	const room = Math.max(1, budget - leadWidth - visibleWidth(suffix) - (resultSummary ? visibleWidth(separator) : 0));
 	// A long outcome may not squeeze the action out of the row.
-	const summaryRoom = Math.max(8, Math.floor(room * 0.4));
-	if (summary && visibleWidth(summary) > summaryRoom) {
-		summary = truncateToWidth(summary, summaryRoom, "…");
+	const resultRoom = Math.max(8, Math.floor(room * 0.4));
+	if (resultSummary && visibleWidth(resultSummary) > resultRoom) {
+		resultSummary = truncateToWidth(resultSummary, resultRoom, "…");
 	}
-	const mainRoom = Math.max(1, room - (summary ? visibleWidth(summary) : 0));
+	const mainRoom = Math.max(1, room - (resultSummary ? visibleWidth(resultSummary) : 0));
 	if (visibleWidth(main) > mainRoom) {
 		main = truncateToWidth(main, mainRoom, "…");
 	}
-	return `${lead}${main}${suffix}${summary ? separator + summary : ""}`;
+	return `${lead}${main}${suffix}${resultSummary ? separator + resultSummary : ""}`;
 }
 
 /** A thinking action in full, for a row the user opened on its own. */
@@ -273,15 +273,15 @@ function thinkingDetail(entry: Entry, theme: Theme): string {
 		.join("\n")}`;
 }
 
-function groupLine(run: Run, pending: number, failed: number, theme: Theme, width: number): string {
-	const tail = lastEntry(run);
-	const count = run.entries.length;
+function chapterLine(chapter: Chapter, pending: number, failed: number, theme: Theme, width: number): string {
+	const tail = lastEntry(chapter);
+	const count = chapter.entries.length;
 	const separator = theme.fg("muted", " · ");
 	const marker = theme.fg("muted", "▶");
 	const lead: string[] = [];
 	if (count > 1) lead.push(theme.fg("muted", `${count} actions`));
 	// A red chapter already says its latest action failed; the count is for the failures before it.
-	if (failed > 0 && !run.lastTool?.error) lead.push(theme.fg("error", `${failed} failed`));
+	if (failed > 0 && !chapter.lastTool?.error) lead.push(theme.fg("error", `${failed} failed`));
 	const hint = count > 1 ? theme.fg("dim", expandHint()) : "";
 
 	// The fixed parts get their space first; the action text takes what is left.
@@ -376,35 +376,35 @@ class ChapterRow implements Component {
 
 	render(width: number): string[] {
 		const entry = byId.get(this.entryId);
-		const run = entry?.run;
-		if (!run) {
+		const chapter = entry?.chapter;
+		if (!chapter) {
 			return [];
 		}
-		const { pending, failed } = tally(run);
+		const { pending, failed } = tally(chapter);
 		// One line, always: the row must never wrap.
 		const inner = innerWidth(width, this.outputPad);
-		const content = this.contentOf(run, entry, pending, failed, inner);
+		const content = this.contentOf(chapter, entry, pending, failed, inner);
 		if (content === undefined) {
 			return [];
 		}
 		// A folded chapter carries its outcome; bookends stay neutral so no action can repaint them.
-		const bg = this.kind === "chapter" ? runBackground(run) : NEUTRAL_BG;
+		const bg = this.kind === "chapter" ? chapterBackground(chapter) : NEUTRAL_BG;
 		this.frame.setBgFn((text) => this.theme.bg(bg, text));
 		this.line.setText(keepBackground(truncateToWidth(content, inner, "…")));
 		return this.frame.render(width);
 	}
 
-	private contentOf(run: Run, entry: Entry, pending: number, failed: number, width: number): string | undefined {
+	private contentOf(chapter: Chapter, entry: Entry, pending: number, failed: number, width: number): string | undefined {
 		switch (this.kind) {
 			case "chapter":
 				// Only the newest tool row draws the folded chapter; the rest keep their own rows.
-				return isChapterRow(entry) ? groupLine(run, pending, failed, this.theme, width) : undefined;
+				return isChapterRow(entry) ? chapterLine(chapter, pending, failed, this.theme, width) : undefined;
 			case "header":
-				return foldLine(run, this.theme, width, true);
+				return foldLine(chapter, this.theme, width, true);
 			case "footer":
 				// The footer sits under the newest row and only while the chapter is open on its own.
-				return run.open && !expandedAll() && run.lastTool === entry
-					? foldLine(run, this.theme, width, false)
+				return chapter.open && !expandedAll() && chapter.lastTool === entry
+					? foldLine(chapter, this.theme, width, false)
 					: undefined;
 		}
 	}
@@ -413,10 +413,10 @@ class ChapterRow implements Component {
 }
 
 /** The fold line at either end of an opened chapter: the same row, pointing the way it folds. */
-function foldLine(run: Run, theme: Theme, width: number, open: boolean): string {
+function foldLine(chapter: Chapter, theme: Theme, width: number, open: boolean): string {
 	const separator = theme.fg("muted", " · ");
 	const parts: string[] = [];
-	if (run.entries.length > 1) parts.push(theme.fg("muted", `${run.entries.length} actions`));
+	if (chapter.entries.length > 1) parts.push(theme.fg("muted", `${chapter.entries.length} actions`));
 	parts.push(theme.fg("dim", "click to collapse"));
 	const line = `${theme.fg("muted", open ? "▼" : "▲")} ${parts.join(separator)}`;
 	const hint = theme.fg("dim", expandHint());
@@ -500,7 +500,7 @@ function thinkingGist(message: MaybeMessage): string {
 }
 
 /**
- * Without the row hook a run's first thinking has no transcript row, so the working line carries
+ * Without the row hook a chapter's first thinking has no transcript row, so the working line carries
  * its gist until a tool call gives it one. Cut so the line cannot wrap.
  */
 function showWorkingGist(ctx: ExtensionContext, gist: string | undefined): void {
@@ -548,7 +548,7 @@ function diffStat(diff: string, theme: Theme): string {
 	return `${theme.fg("success", `+${added}`)} ${theme.fg("error", `-${removed}`)}`;
 }
 
-function headerFor(toolName: string, raw: unknown, theme: Theme, argsComplete: boolean): Header {
+function actionHeader(toolName: string, raw: unknown, theme: Theme, argsComplete: boolean): ActionHeader {
 	const args = (raw ?? {}) as Record<string, unknown>;
 	const title = theme.fg("toolTitle", theme.bold(toolName));
 	switch (toolName) {
@@ -602,7 +602,7 @@ function headerFor(toolName: string, raw: unknown, theme: Theme, argsComplete: b
 	}
 }
 
-function summary(toolName: string, result: Result, theme: Theme, context: Context): string {
+function resultSummary(toolName: string, result: Result, theme: Theme, context: Context): string {
 	// A header-only tool already hides its result, so only its failure earns a line.
 	if (HEADER_ONLY.has(toolName) && !context.isError) {
 		return "";
@@ -610,7 +610,7 @@ function summary(toolName: string, result: Result, theme: Theme, context: Contex
 
 	const lines = outputLines(result);
 	if (context.isError) {
-		return theme.fg("error", cut(lines[0] ?? "failed", SUMMARY_CHARS));
+		return theme.fg("error", cut(lines[0] ?? "failed", RESULT_SUMMARY_CHARS));
 	}
 
 	const details = (result.details ?? {}) as {
@@ -621,7 +621,7 @@ function summary(toolName: string, result: Result, theme: Theme, context: Contex
 	// One line of output is worth showing verbatim; more is only worth counting.
 	const counted = (many: string) =>
 		lines.length <= 1
-			? cut(lines[0] ?? "", SUMMARY_CHARS)
+			? cut(lines[0] ?? "", RESULT_SUMMARY_CHARS)
 			: `${lines.length}${details.truncation?.truncated ? "+" : ""} ${many}`;
 	const slow = context.durationMs !== undefined && context.durationMs >= 1000;
 	const elapsed = slow ? theme.fg("muted", ` · ${(context.durationMs! / 1000).toFixed(1)}s`) : "";
@@ -669,24 +669,24 @@ interface Slots {
 	nativeResult?: Component;
 	/** Whether the tool frames its own rows; nesting it in ours would double the padding. */
 	nativeSelfFramed?: boolean;
-	/** Regions that consume clicks in the expanded list so a gap cannot fold the row away. */
+	/** Regions that consume clicks in the expanded rows so a gap cannot fold the row away. */
 	stackRegion?: MouseRegion;
 	afterRegion?: MouseRegion;
 	actionRegion?: MouseRegion;
-	/** The action slot: the summary frame or the tool's own row while open. */
+	/** The action slot: the action frame or the tool's own row while open. */
 	actionBox?: Container;
-	/** The summary row's click target, which opens the whole chapter. */
+	/** The folded chapter row's click target, which opens the whole chapter. */
 	chapterRegion?: MouseRegion;
 	/** The opened chapter's header row and its click target, which folds it back. */
-	runHeader?: ChapterRow;
-	runHeaderRegion?: MouseRegion;
-	runStack?: Container;
+	chapterHeader?: ChapterRow;
+	chapterHeaderRegion?: MouseRegion;
+	chapterStack?: Container;
 	/** Dark line between the opened chapter's header and its first row. */
-	runGap?: Spacer;
+	chapterGap?: Spacer;
 	/** The opened chapter's footer row and its click target, the same fold at the other end. */
-	runFooter?: ChapterRow;
-	runFooterRegion?: MouseRegion;
-	runFooterStack?: Container;
+	chapterFooter?: ChapterRow;
+	chapterFooterRegion?: MouseRegion;
+	chapterFooterStack?: Container;
 	/** Dark line before the footer, like the gap between rows. */
 	footGap?: Spacer;
 	narrativeStack?: Container;
@@ -723,37 +723,37 @@ function chapterRow(context: Context, theme: Theme): Component {
 	return state.chapter;
 }
 
-/** Clicking a chapter's summary row opens the whole chapter into its rows. */
+/** Clicking a chapter's folded row opens the whole chapter into its rows. */
 function chapterClick(context: Context, entryId: string, child: Component): Component {
 	const state = slots(context);
 	state.chapterRegion ??= new MouseRegion(child, (event) => {
 		// Look the entry up: a rebuild replaces entries after this region was built.
-		const run = byId.get(entryId)?.run;
-		if (event.type !== "click" || event.button !== "left" || !run || listMode(run)) {
+		const chapter = byId.get(entryId)?.chapter;
+		if (event.type !== "click" || event.button !== "left" || !chapter || rowsShown(chapter)) {
 			return undefined;
 		}
-		run.open = true;
-		refreshRun(run);
+		chapter.open = true;
+		refreshChapter(chapter);
 		return { handled: true };
 	});
 	return state.chapterRegion;
 }
 
 /** A fold target at either end of an opened chapter: clicking it folds the rows away again. */
-function runFoldClick(
+function chapterFoldClick(
 	context: Context,
 	entryId: string,
 	child: Component,
-	slot: "runHeaderRegion" | "runFooterRegion",
+	slot: "chapterHeaderRegion" | "chapterFooterRegion",
 ): Component {
 	const state = slots(context);
 	state[slot] ??= new MouseRegion(child, (event) => {
-		const run = byId.get(entryId)?.run;
-		if (event.type !== "click" || event.button !== "left" || !run?.open) {
+		const chapter = byId.get(entryId)?.chapter;
+		if (event.type !== "click" || event.button !== "left" || !chapter?.open) {
 			return undefined;
 		}
-		run.open = false;
-		refreshRun(run);
+		chapter.open = false;
+		refreshChapter(chapter);
 		return { handled: true };
 	});
 	return state[slot];
@@ -778,9 +778,9 @@ interface NativeAction {
 	selfFramed: boolean;
 }
 
-/** Whether the open row shows the tool's own call and result in place of the zen summary line. */
+/** Whether the open row shows the tool's own call and result in place of the zen action line. */
 function showsNative(entry: Entry): boolean {
-	return entry.open === true && listMode(entry.run);
+	return entry.open === true && rowsShown(entry.chapter);
 }
 
 /** The tool's own call and result, once the call slot has built them. */
@@ -791,7 +791,7 @@ function nativeAction(context: Context, entry: Entry): NativeAction | undefined 
 		: undefined;
 }
 
-/** The action row's frame: the summary line, or the tool's own row while it is open. */
+/** The action row's frame: the action line, or the tool's own row while it is open. */
 function actionFrame(context: Context, theme: Theme, entry: Entry): Box {
 	const state = slots(context);
 	state.frame ??= new Box(context.outputPad, 1);
@@ -847,11 +847,11 @@ class ThinkingRows implements Component {
 
 	render(width: number): string[] {
 		const entry = byId.get(this.entryId);
-		const run = entry?.run;
-		if (!entry || !run) {
+		const chapter = entry?.chapter;
+		if (!entry || !chapter) {
 			return [];
 		}
-		const blocks = this.after ? thinkingAfter(run, entry) : thinkingBefore(run, entry);
+		const blocks = this.after ? thinkingAfter(chapter, entry) : thinkingBefore(chapter, entry);
 		if (blocks.length === 0) {
 			this.rows.clear();
 			this.layout = [];
@@ -870,7 +870,7 @@ class ThinkingRows implements Component {
 			// A dark line keeps the block from reading as part of the row beside it.
 			if (this.after) out.push("");
 			const top = out.length;
-			const content = thinkingRowContent(block, this.theme, inner, block.open === true || !listMode(block.run));
+			const content = thinkingRowContent(block, this.theme, inner, block.open === true || !rowsShown(block.chapter));
 			let row = this.rows.get(block.id);
 			if (!row) {
 				row = { text: new Text("", this.outputPad, 1, (line) => this.theme.bg(THINKING_BG, line)), content: "" };
@@ -890,8 +890,8 @@ class ThinkingRows implements Component {
 
 	/** A click on a thinking block opens its full text; anywhere else the row keeps its own behaviour. */
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		const run = byId.get(this.entryId)?.run;
-		if (event.type !== "click" || event.button !== "left" || !listMode(run)) {
+		const chapter = byId.get(this.entryId)?.chapter;
+		if (event.type !== "click" || event.button !== "left" || !rowsShown(chapter)) {
 			return undefined;
 		}
 		const hit = this.layout.find((range) => event.y >= range.top && event.y < range.bottom);
@@ -911,8 +911,8 @@ class ThinkingRows implements Component {
 }
 
 /**
- * A run without a chapter tool draws its thinking as the same purple row the ctrl+o list shows.
- * It reads live state, so it streams in place and folds away on the next draw.
+ * A chapter whose thinking no tool row has taken over draws the same purple row the expanded rows
+ * show. It reads live state, so it streams in place and folds away on the next draw.
  */
 class ChatThinkingRow implements Component {
 	private readonly text: Text;
@@ -928,7 +928,7 @@ class ChatThinkingRow implements Component {
 
 	render(width: number): string[] {
 		const entry = byId.get(this.entryId);
-		if (!entry || takingOver(entry.run)) {
+		if (!entry || takingOver(entry.chapter)) {
 			return [];
 		}
 		const content = thinkingRowContent(entry, this.theme, innerWidth(width, this.outputPad), entry.open === true);
@@ -939,7 +939,7 @@ class ChatThinkingRow implements Component {
 		return this.text.render(width);
 	}
 
-	/** A click opens the full thinking, as in the ctrl+o list. */
+	/** A click opens the full thinking, as in an expanded chapter. */
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		const entry = byId.get(this.entryId);
 		if (event.type !== "click" || event.button !== "left" || !entry) {
@@ -968,7 +968,7 @@ function chatThinkingRow(
 	theme: Theme,
 ): Component | undefined {
 	const entry = messageEntries.get(message);
-	if (!zen || !entry || takingOver(entry.run) || carriesChapterToolCall(message)) {
+	if (!zen || !entry || takingOver(entry.chapter) || carriesChapterToolCall(message)) {
 		return undefined;
 	}
 	let cached = chatRows.get(message);
@@ -984,16 +984,16 @@ function refreshChatRow(): void {
 	thinkingRowHook?.(useChatRow ? chatThinkingRow : undefined);
 }
 
-/** Consumes clicks in the expanded list so a gap or padding line cannot fold the whole row away. */
+/** Consumes clicks in the expanded rows so a gap or padding line cannot fold the whole row away. */
 function consumeClick(
 	context: Context,
-	run: Run | undefined,
+	chapter: Chapter | undefined,
 	child: Component,
 	slot: "stackRegion" | "afterRegion" | "narrativeRegion",
 ): Component {
 	const state = slots(context);
 	state[slot] ??= new MouseRegion(child, (event) => {
-		if (event.type !== "click" || event.button !== "left" || !listMode(run)) {
+		if (event.type !== "click" || event.button !== "left" || !rowsShown(chapter)) {
 			return undefined;
 		}
 		return { handled: true };
@@ -1015,9 +1015,9 @@ function expandedRow(context: Context, theme: Theme, entry: Entry, top: boolean)
 	const state = slots(context);
 	if (!top) {
 		state.expandedAfter ??= new ThinkingRows(entry.id, theme, context.outputPad, true, () => context.invalidate());
-		return consumeClick(context, entry.run, state.expandedAfter, "afterRegion");
+		return consumeClick(context, entry.chapter, state.expandedAfter, "afterRegion");
 	}
-	// The action slot holds either the zen summary frame or the tool's own row while open.
+	// The action slot holds either the zen action frame or the tool's own row while open.
 	state.actionBox ??= new Container();
 	const action = state.actionBox;
 	const native = nativeAction(context, entry);
@@ -1031,7 +1031,7 @@ function expandedRow(context: Context, theme: Theme, entry: Entry, top: boolean)
 		action.addChild(actionFrame(context, theme, entry));
 	}
 	state.actionRegion ??= new MouseRegion(action, (event) => {
-		if (event.type !== "click" || event.button !== "left" || !listMode(entry.run)) {
+		if (event.type !== "click" || event.button !== "left" || !rowsShown(entry.chapter)) {
 			return undefined;
 		}
 		entry.open = !entry.open;
@@ -1042,7 +1042,7 @@ function expandedRow(context: Context, theme: Theme, entry: Entry, top: boolean)
 	state.expandedStack ??= new Container();
 	return consumeClick(
 		context,
-		entry.run,
+		entry.chapter,
 		restack(state.expandedStack, [state.expandedBefore, state.actionRegion]),
 		"stackRegion",
 	);
@@ -1054,7 +1054,7 @@ function rowFrame(context: Context, theme: Theme): RowFrame {
 	return state.row;
 }
 
-/** Pending while the row runs, red when it failed. */
+/** Pending while the action runs, red when it failed. */
 function rowBackground(context: Context): Background {
 	return background(context.isPartial ? 1 : 0, context.isError ? 1 : 0);
 }
@@ -1141,7 +1141,7 @@ function fallbackCall(toolName: string, args: unknown, theme: Theme): string {
 		.map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
 		.join(" ");
 	return pairs
-		? `${theme.fg("toolTitle", theme.bold(toolName))} ${theme.fg("muted", cut(pairs, HEADER_CHARS))}`
+		? `${theme.fg("toolTitle", theme.bold(toolName))} ${theme.fg("muted", cut(pairs, ACTION_HEADER_CHARS))}`
 		: theme.fg("toolTitle", theme.bold(toolName));
 }
 
@@ -1165,11 +1165,11 @@ function trackThinking(message: MaybeMessage, ctx: ExtensionContext): void {
 	// Keep the message: the detail is read from it at render time, so a long block costs
 	// one first-line scan per delta instead of rebuilding the whole text.
 	entry.message = message;
-	entry.header = { main: thinkingGist(message), suffix: "" };
+	entry.actionHeader = { main: thinkingGist(message), suffix: "" };
 	messageEntries.set(message, entry);
 	// A later message trails a chapter row that draws its thinking; with the hook pi draws the row itself.
 	const carried =
-		zen && omitsThinking && !useChatRow && !entry.run?.lastTool && thinkingOnly(message) ? entry.header.main : "";
+		zen && omitsThinking && !useChatRow && !entry.chapter?.lastTool && thinkingOnly(message) ? entry.actionHeader.main : "";
 	showWorkingGist(ctx, carried || undefined);
 }
 
@@ -1212,7 +1212,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", (_event, ctx) => showWorkingGist(ctx, undefined));
 
 	pi.registerCommand("zen", {
-		description: "Toggle zen mode (one row per run)",
+		description: "Toggle zen mode (one row per chapter)",
 		handler: async (args, ctx) => {
 			const wanted = args.trim().toLowerCase();
 			zen = wanted === "on" ? true : wanted === "off" ? false : !zen;
@@ -1220,7 +1220,7 @@ export default function (pi: ExtensionAPI) {
 			applyZenUI(ctx);
 			nudgeRedraw(ctx);
 			if (ctx.hasUI) {
-				ctx.ui.notify(`Zen mode ${zen ? "on — one row per run" : "off — pi's own rendering"}`, "info");
+				ctx.ui.notify(`Zen mode ${zen ? "on — one row per chapter" : "off — pi's own rendering"}`, "info");
 			}
 		},
 	});
@@ -1250,16 +1250,16 @@ export default function (pi: ExtensionAPI) {
 					state.narrativeStack ??= new Container();
 					return consumeClick(
 						context,
-						entry.run,
+						entry.chapter,
 						restack(state.narrativeStack, [state.narrativeBefore, row]),
 						"narrativeRegion",
 					);
 				}
 				const entry = toolEntry(context.toolCallId, false);
-				entry.header = headerFor(toolName, args, theme, context.argsComplete);
+				entry.actionHeader = actionHeader(toolName, args, theme, context.argsComplete);
 				invalidators.set(context.toolCallId, context.invalidate);
-				const run = entry.run;
-				if (!context.expanded && run?.open !== true) {
+				const chapter = entry.chapter;
+				if (!context.expanded && chapter?.open !== true) {
 					return chapterClick(context, entry.id, chapterRow(context, theme));
 				}
 				if (showsNative(entry)) {
@@ -1268,15 +1268,15 @@ export default function (pi: ExtensionAPI) {
 					state.nativeSelfFramed = selfFramed;
 				}
 				const row = expandedRow(context, theme, entry, true);
-				if (run?.open && !expandedAll() && firstToolOf(run) === entry) {
+				if (chapter?.open && !expandedAll() && firstToolOf(chapter) === entry) {
 					// An opened chapter gets a header row, which folds it back on click.
 					const state = slots(context);
-					state.runHeader ??= new ChapterRow(entry.id, theme, context.outputPad, "header");
-					state.runGap ??= new Spacer(1);
-					state.runStack ??= new Container();
-					return restack(state.runStack, [
-						runFoldClick(context, entry.id, state.runHeader, "runHeaderRegion"),
-						state.runGap,
+					state.chapterHeader ??= new ChapterRow(entry.id, theme, context.outputPad, "header");
+					state.chapterGap ??= new Spacer(1);
+					state.chapterStack ??= new Container();
+					return restack(state.chapterStack, [
+						chapterFoldClick(context, entry.id, state.chapterHeader, "chapterHeaderRegion"),
+						state.chapterGap,
 						row,
 					]);
 				}
@@ -1295,11 +1295,11 @@ export default function (pi: ExtensionAPI) {
 				const entry = toolEntry(context.toolCallId, false);
 				entry.done = !options.isPartial;
 				entry.error = context.isError;
-				entry.summary = summary(toolName, result, theme, context);
+				entry.resultSummary = resultSummary(toolName, result, theme, context);
 				invalidators.set(context.toolCallId, context.invalidate);
 				// The builtin renderers clear their own clock interval; zen never calls them, so do it here.
 				stopStaleTimer(context);
-				if (context.expanded || entry.run?.open === true) {
+				if (context.expanded || entry.chapter?.open === true) {
 					const state = slots(context);
 					if (showsNative(entry)) {
 						// Append the tool's own result under its call.
@@ -1309,17 +1309,17 @@ export default function (pi: ExtensionAPI) {
 						actionFrame(context, theme, entry);
 					}
 					const row = expandedRow(context, theme, entry, false);
-					const run = entry.run;
-					if (!run?.open || expandedAll() || run.lastTool !== entry) {
+					const chapter = entry.chapter;
+					if (!chapter?.open || expandedAll() || chapter.lastTool !== entry) {
 						return row;
 					}
-					state.runFooter ??= new ChapterRow(entry.id, theme, context.outputPad, "footer");
+					state.chapterFooter ??= new ChapterRow(entry.id, theme, context.outputPad, "footer");
 					state.footGap ??= new Spacer(1);
-					state.runFooterStack ??= new Container();
-					return restack(state.runFooterStack, [
+					state.chapterFooterStack ??= new Container();
+					return restack(state.chapterFooterStack, [
 						row,
 						state.footGap,
-						runFoldClick(context, entry.id, state.runFooter, "runFooterRegion"),
+						chapterFoldClick(context, entry.id, state.chapterFooter, "chapterFooterRegion"),
 					]);
 				}
 				// The call slot draws the chapter row; this one stays empty so it is drawn once.
@@ -1404,11 +1404,11 @@ function nudgeRedraw(ctx: ExtensionContext): void {
 }
 
 /** Chapters opened by hand, so one key can fold all of them. */
-function openRuns(): Run[] {
-	const open = new Set<Run>();
+function openChapters(): Chapter[] {
+	const open = new Set<Chapter>();
 	for (const entry of byId.values()) {
-		if (entry.run?.open === true) {
-			open.add(entry.run);
+		if (entry.chapter?.open === true) {
+			open.add(entry.chapter);
 		}
 	}
 	return [...open];
@@ -1429,13 +1429,13 @@ function watchExpandKey(ctx: ExtensionContext): void {
 		if (!zen || !getKeybindings().matches(data, "app.tools.expand")) {
 			return undefined;
 		}
-		const open = openRuns();
+		const open = openChapters();
 		if (open.length === 0) {
 			return undefined;
 		}
-		for (const run of open) {
-			run.open = false;
-			refreshRun(run);
+		for (const chapter of open) {
+			chapter.open = false;
+			refreshChapter(chapter);
 		}
 		if (expandedAll()) {
 			ui.setToolsExpanded(false);
@@ -1444,7 +1444,7 @@ function watchExpandKey(ctx: ExtensionContext): void {
 	});
 }
 
-/** Group the stored actions the way the transcript would have grouped them live. */
+/** Rebuild the chapters the way the transcript grouped them live. */
 function rebuild(ctx: ExtensionContext): void {
 	byId.clear();
 	messageEntries = new WeakMap();
@@ -1462,7 +1462,7 @@ function rebuild(ctx: ExtensionContext): void {
 		if (hasThinking(message)) {
 			const thinking = thinkingEntry(`thinking-${++thinkingCount}`);
 			thinking.message = message;
-			thinking.header = { main: thinkingGist(message), suffix: "" };
+			thinking.actionHeader = { main: thinkingGist(message), suffix: "" };
 			messageEntries.set(message, thinking);
 		}
 		for (const block of blocksOf(message)) {
