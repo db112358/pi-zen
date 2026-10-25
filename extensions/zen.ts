@@ -19,6 +19,7 @@ import { Box, Container, getKeybindings, MouseRegion, Spacer, Text, truncateToWi
 
 type Context = Parameters<NonNullable<ToolRenderers["renderCall"]>>[2];
 type Result = Parameters<NonNullable<ToolRenderers["renderResult"]>>[0];
+type ResultOptions = Parameters<NonNullable<ToolRenderers["renderResult"]>>[1];
 type Background = "toolPendingBg" | "toolErrorBg" | "toolSuccessBg";
 
 /** pi's `setThinkingRow` shape, so zen loads against a build without the hook. */
@@ -761,7 +762,7 @@ function actionFrame(context: Context, theme: Theme, entry: Entry): Box {
 	const state = slots(context);
 	state.frame ??= new Box(context.outputPad, 1);
 	const frame = state.frame;
-	frame.setBgFn((line) => theme.bg(background(context.isPartial ? 1 : 0, context.isError ? 1 : 0), line));
+	frame.setBgFn((line) => theme.bg(rowBackground(context), line));
 	frame.clear();
 	if (entry.open && listMode(entry.run) && state.nativeCall) {
 		frame.addChild(state.nativeCall);
@@ -1010,6 +1011,63 @@ function rowFrame(context: Context, theme: Theme): RowFrame {
 	return state.row;
 }
 
+/** Pending while the row runs, red when it failed. */
+function rowBackground(context: Context): Background {
+	return background(context.isPartial ? 1 : 0, context.isError ? 1 : 0);
+}
+
+/** The tool's own call component, or zen's fallback line when it ships no renderer. */
+function builtinCall(
+	context: Context,
+	args: unknown,
+	theme: Theme,
+	toolName: string,
+	render: ToolRenderers["renderCall"],
+): Component {
+	return render
+		? delegated(context, "builtinCall", (ctx) => render(args, theme, ctx))
+		: new Text(fallbackCall(toolName, args, theme), 0, 0);
+}
+
+/** The tool's own result component, or the fallback the caller builds when it ships no renderer. */
+function builtinResult(
+	context: Context,
+	result: Result,
+	options: ResultOptions,
+	theme: Theme,
+	render: ToolRenderers["renderResult"],
+	fallback: () => Component,
+): Component {
+	return render
+		? delegated(context, "builtinResult", (ctx) => render(result, options, theme, ctx))
+		: fallback();
+}
+
+/** The call slot returns zen's frame, or the builtin's own row when it frames itself. */
+function framedCall(context: Context, theme: Theme, component: Component, selfFramed: boolean): Component {
+	if (selfFramed) {
+		return component;
+	}
+	const frame = rowFrame(context, theme);
+	frame.setCall(component, rowBackground(context));
+	return frame;
+}
+
+/** The result joins the call slot's frame; this slot stays empty so the row draws once. */
+function framedResult(context: Context, theme: Theme, component: Component, selfFramed: boolean): Component {
+	if (selfFramed) {
+		return component;
+	}
+	rowFrame(context, theme).setResult(component, rowBackground(context));
+	return emptySlot(context);
+}
+
+/** The empty result slot, reused so a row's tree stays stable. */
+function emptySlot(context: Context): Component {
+	const state = slots(context);
+	return (state.empty ??= new Container());
+}
+
 /** Second line for a narrative tool without renderers of its own, reused so the frame's child stays stable. */
 function noteFallback(context: Context, result: Result, options: { expanded: boolean }, theme: Theme): Component {
 	const state = slots(context);
@@ -1157,31 +1215,12 @@ export default function (pi: ExtensionAPI) {
 			renderShell: "self",
 			renderCall(args, theme, context) {
 				const render = builtin?.renderCall;
-				if (!zen) {
-					const component = render
-						? delegated(context, "builtinCall", (ctx) => render(args, theme, ctx))
-						: new Text(fallbackCall(toolName, args, theme), 0, 0);
-					if (selfFramed) {
-						return component;
-					}
-					const frame = rowFrame(context, theme);
-					frame.setCall(component, background(context.isPartial ? 1 : 0, context.isError ? 1 : 0));
-					return frame;
-				}
-				if (narrative(toolName)) {
-					// A narrative tool keeps its own row: it is the log, not the work.
-					const entry = toolEntry(context.toolCallId, true);
-					const component = render
-						? delegated(context, "builtinCall", (ctx) => render(args, theme, ctx))
-						: new Text(fallbackCall(toolName, args, theme), 0, 0);
-					let row = component;
-					if (!selfFramed) {
-						const frame = rowFrame(context, theme);
-						frame.setCall(component, background(context.isPartial ? 1 : 0, context.isError ? 1 : 0));
-						row = frame;
-					}
+				// Zen off and a narrative tool both draw the tool's own row; only the log takes the thinking.
+				if (!zen || narrative(toolName)) {
+					const entry = zen ? toolEntry(context.toolCallId, true) : undefined;
+					const row = framedCall(context, theme, builtinCall(context, args, theme, toolName, render), selfFramed);
 					// With the hook the chat row above already draws it.
-					if (!context.expanded || useChatRow) {
+					if (!entry || !context.expanded || useChatRow) {
 						return row;
 					}
 					const state = slots(context);
@@ -1202,9 +1241,7 @@ export default function (pi: ExtensionAPI) {
 				if (entry.open && listMode(run)) {
 					// The row is open: its frame shows the tool's own call instead of the summary line.
 					const state = slots(context);
-					state.nativeCall = render
-						? delegated(context, "builtinCall", (ctx) => render(args, theme, ctx))
-						: new Text(fallbackCall(toolName, args, theme), 0, 0);
+					state.nativeCall = builtinCall(context, args, theme, toolName, render);
 					state.nativeSelfFramed = selfFramed;
 				}
 				const row = expandedRow(context, theme, entry, true);
@@ -1223,29 +1260,13 @@ export default function (pi: ExtensionAPI) {
 			},
 			renderResult(result, options, theme, context) {
 				const render = builtin?.renderResult;
-				if (!zen) {
-					const component = render
-						? delegated(context, "builtinResult", (ctx) => render(result, options, theme, ctx))
-						: fallbackResult(result, options, theme);
-					if (selfFramed) {
-						return component;
-					}
-					const state = slots(context);
-					rowFrame(context, theme).setResult(component, background(context.isPartial ? 1 : 0, context.isError ? 1 : 0));
-					return (state.empty ??= new Container());
-				}
-				if (narrative(toolName)) {
-					toolEntry(context.toolCallId, true);
-					const component = render
-						? delegated(context, "builtinResult", (ctx) => render(result, options, theme, ctx))
-						: noteFallback(context, result, options, theme);
-					if (selfFramed) {
-						return component;
-					}
-					// The call slot owns the frame; it redraws with this line on the next draw.
-					const state = slots(context);
-					rowFrame(context, theme).setResult(component, background(context.isPartial ? 1 : 0, context.isError ? 1 : 0));
-					return (state.empty ??= new Container());
+				const narrativeRow = zen && narrative(toolName);
+				if (!zen || narrativeRow) {
+					if (narrativeRow) toolEntry(context.toolCallId, true);
+					const fallback = narrativeRow
+						? () => noteFallback(context, result, options, theme)
+						: () => fallbackResult(result, options, theme);
+					return framedResult(context, theme, builtinResult(context, result, options, theme, render, fallback), selfFramed);
 				}
 				const entry = toolEntry(context.toolCallId, false);
 				entry.done = !options.isPartial;
@@ -1258,9 +1279,9 @@ export default function (pi: ExtensionAPI) {
 					const state = slots(context);
 					if (entry.open && listMode(entry.run)) {
 						// The row is open: append the tool's own result under its call.
-						state.nativeResult = render
-							? delegated(context, "builtinResult", (ctx) => render(result, { ...options, expanded: true }, theme, ctx))
-							: fallbackResult(result, { ...options, expanded: true }, theme);
+						const nativeOptions = { ...options, expanded: true };
+						const fallback = () => fallbackResult(result, nativeOptions, theme);
+						state.nativeResult = builtinResult(context, result, nativeOptions, theme, render, fallback);
 						actionFrame(context, theme, entry);
 					}
 					const row = expandedRow(context, theme, entry, false);
@@ -1277,9 +1298,7 @@ export default function (pi: ExtensionAPI) {
 					return state.runFooterStack;
 				}
 				// The call slot draws the chapter row; this one stays empty so it is drawn once.
-				const state = slots(context);
-				state.empty ??= new Container();
-				return state.empty;
+				return emptySlot(context);
 			},
 		};
 	});
