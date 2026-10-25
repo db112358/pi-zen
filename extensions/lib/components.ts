@@ -30,6 +30,8 @@ import {
 	type Background,
 	type Chapter,
 	type Entry,
+	type ThinkingEntry,
+	type ToolEntry,
 } from "./model";
 
 function expandHint(): string {
@@ -46,7 +48,7 @@ export function entryLine(entry: Entry, theme: Theme, budget: number): string {
 	const lead = entry.kind === "thinking" ? `${theme.fg("toolTitle", theme.bold("thinking"))} ` : "";
 	let { main } = entry.actionHeader;
 	const { suffix } = entry.actionHeader;
-	let resultSummary = entry.resultSummary;
+	let resultSummary = entry.kind === "tool" ? entry.resultSummary : "";
 	const leadWidth = visibleWidth(lead);
 	const room = Math.max(1, budget - leadWidth - visibleWidth(suffix) - (resultSummary ? visibleWidth(separator) : 0));
 	// A long outcome may not squeeze the action out of the row.
@@ -62,9 +64,9 @@ export function entryLine(entry: Entry, theme: Theme, budget: number): string {
 }
 
 /** A thinking action in full, for a row the user opened on its own. */
-function thinkingDetail(entry: Entry, theme: Theme): string {
+function thinkingDetail(entry: ThinkingEntry, theme: Theme): string {
 	const head = theme.fg("toolTitle", theme.bold("thinking"));
-	const text = entry.message ? thinkingText(entry.message) : "";
+	const text = thinkingText(entry.message);
 	if (!text) {
 		return head;
 	}
@@ -177,10 +179,10 @@ export class ChapterRow implements Component {
 
 	render(width: number): string[] {
 		const entry = byId.get(this.entryId);
-		const chapter = entry?.chapter;
-		if (!chapter) {
+		if (entry?.kind !== "tool" || !entry.chapter) {
 			return [];
 		}
+		const chapter = entry.chapter;
 		const { pending, failed } = tally(chapter);
 		// One line, always: the row must never wrap.
 		const inner = innerWidth(width, this.outputPad);
@@ -195,7 +197,7 @@ export class ChapterRow implements Component {
 		return this.frame.render(width);
 	}
 
-	private contentOf(chapter: Chapter, entry: Entry, pending: number, failed: number, width: number): string | undefined {
+	private contentOf(chapter: Chapter, entry: ToolEntry, pending: number, failed: number, width: number): string | undefined {
 		switch (this.kind) {
 			case "chapter":
 				// Only the newest tool row draws the folded chapter; the rest keep their own rows.
@@ -233,7 +235,7 @@ function innerWidth(width: number, outputPad: number): number {
 }
 
 /** A thinking block as its row shows it: the one-line gist, or the whole block once it is open. */
-function thinkingRowContent(entry: Entry, theme: Theme, width: number, full: boolean): string {
+function thinkingRowContent(entry: ThinkingEntry, theme: Theme, width: number, full: boolean): string {
 	return full
 		? thinkingDetail(entry, theme)
 		: keepBackground(truncateToWidth(entryLine(entry, theme, width), width, "…"));
@@ -340,7 +342,7 @@ export class ChatThinkingRow implements Component {
 
 	render(width: number): string[] {
 		const entry = byId.get(this.entryId);
-		if (!entry || takingOver(entry.chapter)) {
+		if (entry?.kind !== "thinking" || takingOver(entry.chapter)) {
 			return [];
 		}
 		const content = thinkingRowContent(entry, this.theme, innerWidth(width, this.outputPad), entry.open === true);
@@ -354,7 +356,7 @@ export class ChatThinkingRow implements Component {
 	/** A click opens the full thinking, as in an expanded chapter. */
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		const entry = byId.get(this.entryId);
-		if (event.type !== "click" || event.button !== "left" || !entry) {
+		if (event.type !== "click" || event.button !== "left" || entry?.kind !== "thinking") {
 			return undefined;
 		}
 		entry.open = !entry.open;

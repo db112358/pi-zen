@@ -16,33 +16,49 @@ export function narrative(toolName: string): boolean {
 	return NARRATIVE.has(toolName);
 }
 
-/** One action: a tool call or a thinking block. */
-export interface Entry {
+/** The fields both kinds of row carry. */
+interface BaseEntry {
 	id: string;
-	kind: "tool" | "thinking";
 	/** Chapter this entry belongs to; a narrative row stands alone. */
 	chapter: Chapter | undefined;
 	/** One line, styled: the part that may be cut, and the suffix that should survive. */
 	actionHeader: ActionHeader;
-	/** Styled result summary, tools only. */
-	resultSummary: string;
-	/** Whether the row shows its thinking in full rather than as a one-line gist. */
+	/** Whether the row is open: thinking shown in full, or the tool's own row. */
 	open?: boolean;
+}
+
+/** A tool call's row: what it ran, and the state of its result. */
+export interface ToolEntry extends BaseEntry {
+	kind: "tool";
+	/** Styled result summary. */
+	resultSummary: string;
 	/** Narrative rows never take a thinking row over. */
-	narrative?: boolean;
-	/** Message the thinking came from, thinking only; the detail is read from it at render time. */
-	message?: MaybeMessage;
+	narrative: boolean;
 	done: boolean;
 	error: boolean;
 }
+
+/** A thinking block's row; it keeps the message so a delta costs one gist scan, not a text rebuild. */
+export interface ThinkingEntry extends BaseEntry {
+	kind: "thinking";
+	message: MaybeMessage;
+}
+
+/** One action: a tool call or a thinking block. */
+export type Entry = ToolEntry | ThinkingEntry;
 
 /** Everything since the last user message or narrative row, drawn as one row. */
 export interface Chapter {
 	entries: Entry[];
 	/** Newest tool row; kept here so the chapter check stays O(1). */
-	lastTool?: Entry;
+	lastTool?: ToolEntry;
 	/** Whether this chapter alone is expanded into its rows, outside ctrl+o. */
 	open?: boolean;
+}
+
+/** Whether an entry is a tool call's row. */
+function isTool(entry: Entry): entry is ToolEntry {
+	return entry.kind === "tool";
 }
 
 export const byId = new Map<string, Entry>();
@@ -52,7 +68,7 @@ let current: Chapter | undefined;
 let thinkingId: string | undefined;
 let thinkingCount = 0;
 /** A message's thinking entry, so its chat row finds it after streaming. */
-let messageEntries = new WeakMap<object, Entry>();
+let messageEntries = new WeakMap<object, ThinkingEntry>();
 /** Whether the transcript shows tool output expanded, as opposed to one clicked row. */
 let expandReader = (): boolean => false;
 
@@ -71,8 +87,8 @@ export function rowsShown(chapter: Chapter | undefined): boolean {
 	return expandedAll() || chapter?.open === true;
 }
 
-export function firstToolOf(chapter: Chapter): Entry | undefined {
-	return chapter.entries.find((entry) => entry.kind === "tool");
+export function firstToolOf(chapter: Chapter): ToolEntry | undefined {
+	return chapter.entries.find(isTool);
 }
 
 /** Redraw every row of a chapter after its open state changed. */
@@ -93,12 +109,12 @@ export function openChapters(): Chapter[] {
 	return [...open];
 }
 
-export function toolEntry(toolCallId: string, standalone: boolean): Entry {
+export function toolEntry(toolCallId: string, standalone: boolean): ToolEntry {
 	const existing = byId.get(toolCallId);
-	if (existing) {
+	if (existing?.kind === "tool") {
 		return existing;
 	}
-	const entry: Entry = { id: toolCallId, kind: "tool", chapter: undefined, actionHeader: { main: "", suffix: "" }, resultSummary: "", done: false, error: false, narrative: standalone };
+	const entry: ToolEntry = { id: toolCallId, kind: "tool", chapter: undefined, actionHeader: { main: "", suffix: "" }, resultSummary: "", done: false, error: false, narrative: standalone };
 	if (standalone) {
 		// A narrative row heads its own chapter and takes the thinking that led to it, which
 		// otherwise would only have the chat row to draw it.
@@ -130,13 +146,17 @@ export function toolEntry(toolCallId: string, standalone: boolean): Entry {
 	return entry;
 }
 
-function thinkingEntry(id: string): Entry {
+function thinkingEntry(id: string, message: MaybeMessage): ThinkingEntry {
+	const actionHeader = { main: thinkingGist(message), suffix: "" };
 	const existing = byId.get(id);
-	if (existing) {
+	if (existing?.kind === "thinking") {
+		// Streaming replaces the message the detail is read from, and its gist.
+		existing.message = message;
+		existing.actionHeader = actionHeader;
 		return existing;
 	}
 	const chapter = (current ??= { entries: [] });
-	const entry: Entry = { id, kind: "thinking", chapter, actionHeader: { main: "", suffix: "" }, resultSummary: "", done: true, error: false };
+	const entry: ThinkingEntry = { id, kind: "thinking", chapter, actionHeader, message };
 	chapter.entries.push(entry);
 	byId.set(id, entry);
 	return entry;
@@ -154,21 +174,17 @@ export function beginThinking(): void {
 }
 
 /** Fold a message's thinking into the chapter, as the action that is running now. */
-export function foldThinking(message: MaybeMessage): Entry | undefined {
+export function foldThinking(message: MaybeMessage): ThinkingEntry | undefined {
 	if (message.role !== "assistant" || !thinkingId || !hasThinking(message)) {
 		return undefined;
 	}
-	const entry = thinkingEntry(thinkingId);
-	// Keep the message: the detail is read from it at render time, so a long block costs
-	// one first-line scan per delta instead of rebuilding the whole text.
-	entry.message = message;
-	entry.actionHeader = { main: thinkingGist(message), suffix: "" };
+	const entry = thinkingEntry(thinkingId, message);
 	messageEntries.set(message, entry);
 	return entry;
 }
 
 /** A message's thinking entry, for the row pi draws in place of its thinking. */
-export function entryForMessage(message: MaybeMessage): Entry | undefined {
+export function entryForMessage(message: MaybeMessage): ThinkingEntry | undefined {
 	return messageEntries.get(message);
 }
 
@@ -177,43 +193,49 @@ export function lastEntry(chapter: Chapter): Entry | undefined {
 }
 
 /** The tool that has taken a chapter's thinking over; narrative rows never do. */
-export function takingOver(chapter: Chapter | undefined): Entry | undefined {
+export function takingOver(chapter: Chapter | undefined): ToolEntry | undefined {
 	const last = chapter?.lastTool;
 	return last?.narrative ? undefined : last;
 }
 
 /** Only the newest tool row of a chapter draws the chapter, so the rest fold away. */
-export function isChapterRow(entry: Entry): boolean {
-	return entry.kind === "tool" && entry.chapter?.lastTool === entry;
+export function isChapterRow(entry: Entry): entry is ToolEntry {
+	return isTool(entry) && entry.chapter?.lastTool === entry;
 }
 
 /** Thinking drawn above a tool row: the blocks that came since the previous tool. */
-export function thinkingBefore(chapter: Chapter, entry: Entry): Entry[] {
+export function thinkingBefore(chapter: Chapter, entry: Entry): ThinkingEntry[] {
 	const index = chapter.entries.indexOf(entry);
-	const out: Entry[] = [];
-	for (let i = index - 1; i >= 0 && chapter.entries[i].kind === "thinking"; i--) {
-		out.unshift(chapter.entries[i]);
+	const out: ThinkingEntry[] = [];
+	for (let i = index - 1; i >= 0; i--) {
+		const prev = chapter.entries[i];
+		if (prev.kind !== "thinking") break;
+		out.unshift(prev);
 	}
 	return out;
 }
 
 /** Thinking with no tool after it hangs below the chapter's last tool row. */
-export function thinkingAfter(chapter: Chapter, entry: Entry): Entry[] {
+export function thinkingAfter(chapter: Chapter, entry: Entry): ThinkingEntry[] {
 	if (!isChapterRow(entry)) {
 		return [];
 	}
 	const index = chapter.entries.indexOf(entry);
-	const out: Entry[] = [];
-	for (let i = index + 1; i < chapter.entries.length && chapter.entries[i].kind === "thinking"; i++) {
-		out.push(chapter.entries[i]);
+	const out: ThinkingEntry[] = [];
+	for (let i = index + 1; i < chapter.entries.length; i++) {
+		const next = chapter.entries[i];
+		if (next.kind !== "thinking") break;
+		out.push(next);
 	}
 	return out;
 }
 
+/** Only a tool call can be pending or failed; thinking is finished as it is drawn. */
 export function tally(chapter: Chapter): { pending: number; failed: number } {
 	let pending = 0;
 	let failed = 0;
 	for (const entry of chapter.entries) {
+		if (!isTool(entry)) continue;
 		if (!entry.done) pending++;
 		if (entry.error) failed++;
 	}
@@ -227,7 +249,7 @@ export function background(pending: number, failed: number): Background {
 
 /** A chapter takes its colour from its latest result; failures it recovered from stay counted. */
 export function chapterBackground(chapter: Chapter): Background {
-	if (chapter.entries.some((entry) => !entry.done)) return "toolPendingBg";
+	if (chapter.entries.some((entry) => isTool(entry) && !entry.done)) return "toolPendingBg";
 	return chapter.lastTool?.error ? "toolErrorBg" : "toolSuccessBg";
 }
 
@@ -253,10 +275,7 @@ export function rebuild(ctx: ExtensionContext): void {
 		}
 		if (message.role !== "assistant") continue;
 		if (hasThinking(message)) {
-			const thinking = thinkingEntry(`thinking-${++thinkingCount}`);
-			thinking.message = message;
-			thinking.actionHeader = { main: thinkingGist(message), suffix: "" };
-			messageEntries.set(message, thinking);
+			messageEntries.set(message, thinkingEntry(`thinking-${++thinkingCount}`, message));
 		}
 		for (const block of blocksOf(message)) {
 			if (block.type === "toolCall" && typeof block.id === "string") {
