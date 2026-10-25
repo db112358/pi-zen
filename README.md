@@ -49,13 +49,14 @@ cd pi-zen
 ## Layout
 
 ```
-extensions/zen.ts         the extension: settings, lifecycle and tool renderers
-extensions/lib/format.ts  pure formatting: action lines, result summaries, thinking text
-extensions/lib/model.ts   the chapter model: entries, grouping, shared maps, rebuild
-scripts/                  fork install and patch helpers
-tests/zen-harness.mjs     component-level checks (fake pi, no terminal)
-tests/zen-real-test.mjs   smoke test against the installed builtin renderers
-tests/zen-click-test.sh   end-to-end: real pi under tmux with injected SGR mouse events
+extensions/zen.ts               the extension: settings, lifecycle and renderer wiring
+extensions/lib/components.ts    the rows: tool frames, chapter rows, thinking rows
+extensions/lib/format.ts        pure formatting: action lines, result summaries, thinking text
+extensions/lib/model.ts         the chapter model: entries, grouping, shared maps, rebuild
+scripts/                        fork install and patch helpers
+tests/zen-harness.mjs           component-level checks (fake pi, no terminal)
+tests/zen-real-test.mjs         smoke test against the installed builtin renderers
+tests/zen-click-test.sh         end-to-end: real pi under tmux with injected SGR mouse events
 ```
 
 ## Tests
