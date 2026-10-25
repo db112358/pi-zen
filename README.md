@@ -55,6 +55,7 @@ extensions/lib/format.ts        pure formatting: action lines, result summaries,
 extensions/lib/model.ts         the chapter model: entries, grouping, shared maps, rebuild
 scripts/                        fork install and patch helpers
 tests/zen-harness.mjs           component-level checks (fake pi, no terminal)
+tests/zen-format-test.mjs       table checks for the exported formatting helpers
 tests/zen-real-test.mjs         smoke test against the installed builtin renderers
 tests/zen-click-test.sh         end-to-end: real pi under tmux with injected SGR mouse events
 ```
@@ -62,6 +63,6 @@ tests/zen-click-test.sh         end-to-end: real pi under tmux with injected SGR
 ## Tests
 
 ```sh
-npm test            # harness + real-builtin checks
+npm test            # format tables + harness + real-builtin checks
 npm run test:click  # needs tmux; also covers /reload
 ```
