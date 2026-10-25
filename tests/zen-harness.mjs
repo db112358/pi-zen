@@ -746,6 +746,13 @@ function check(name, cond, extra = "") {
 	check("chat row shows the thinking gist", flat(chatLines).includes("thinking Chat row plan."), flat(chatLines));
 	check("chat row is purple", hasBg(chatLines, "customMessageBg"), JSON.stringify(bgSeq(chatLines)));
 	check("chat row replaces the working line", h.workingMessage === undefined, String(h.workingMessage));
+	// `expanded` is thinking visibility, on by default, not row expansion: the gist must survive it.
+	const expandedChat = flat(chatRenderer(chatMsg, { expanded: true, outputPad: 1 }, theme).render(80));
+	check(
+		"chat row keeps its gist with expanded true",
+		expandedChat.includes("thinking Chat row plan.") && !expandedChat.includes("Chat row detail."),
+		expandedChat,
+	);
 	chatRow.handleMouse({ type: "click", button: "left", x: 5, y: 2, screenX: 5, screenY: 2, width: 80, height: 5, shift: false, alt: false, ctrl: false, clickCount: 1 });
 	check("chat row opens the full thinking", flat(chatRow.render(80)).includes("Chat row detail."), flat(chatRow.render(80)));
 	h.startAssistant();

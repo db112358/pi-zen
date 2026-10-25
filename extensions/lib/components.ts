@@ -325,7 +325,8 @@ export class ThinkingRows implements Component {
 
 /**
  * A chapter whose thinking no tool row has taken over draws the same purple row the expanded rows
- * show. It reads live state, so it streams in place and folds away on the next draw.
+ * show. It reads live state, so it streams in place and folds away on the next draw. It always draws
+ * the gist until a click opens it: `expanded` is thinking visibility, not row expansion.
  */
 export class ChatThinkingRow implements Component {
 	private readonly text: Text;
