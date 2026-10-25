@@ -33,6 +33,8 @@ const HEADER_CHARS = 100;
 const SUMMARY_CHARS = 120;
 /** A command is kept whole so the row can use whatever width it has; only absurd lines are cut. */
 const COMMAND_CHARS = 400;
+/** Lines a collapsed fallback row shows. */
+const FALLBACK_LINES = 10;
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const STATE_FILE = join(AGENT_DIR, "extensions", "zen.json");
 
@@ -443,41 +445,49 @@ function gist(text: string): string {
 	return "";
 }
 
+/** Any message shape that can carry thinking blocks. */
+interface MaybeMessage {
+	role: string;
+	content?: unknown;
+}
+
+/** The parts of a content block zen reads. */
+interface ContentBlock {
+	type: string;
+	text?: string;
+	thinking?: string;
+	id?: string;
+	name?: string;
+}
+
+/** A message's content blocks, empty when it has none. */
+function blocksOf(message: MaybeMessage): ReadonlyArray<ContentBlock> {
+	return Array.isArray(message.content) ? (message.content as ReadonlyArray<ContentBlock>) : [];
+}
+
 /** Whether a message carries thinking worth a row. */
 function hasThinking(message: MaybeMessage): boolean {
-	return (
-		Array.isArray(message.content) &&
-		(message.content as ReadonlyArray<{ type: string; thinking?: string }>).some(
-			(block) => block.type === "thinking" && typeof block.thinking === "string" && /\S/.test(block.thinking),
-		)
+	return blocksOf(message).some(
+		(block) => block.type === "thinking" && typeof block.thinking === "string" && /\S/.test(block.thinking),
 	);
 }
 
 /** Whether a message carries a tool call: the action that will draw its thinking. */
 function carriesToolCall(message: MaybeMessage): boolean {
-	return (
-		Array.isArray(message.content) &&
-		(message.content as ReadonlyArray<{ type: string }>).some((block) => block.type === "toolCall")
-	);
+	return blocksOf(message).some((block) => block.type === "toolCall");
 }
 
 /** Whether the message holds only thinking so far, so the working line can stand in for it. */
 function thinkingOnly(message: MaybeMessage): boolean {
-	return (
-		!carriesToolCall(message) &&
-		Array.isArray(message.content) &&
-		!(message.content as ReadonlyArray<{ type: string; text?: string }>).some(
-			(block) => block.type === "text" && block.text?.trim(),
-		)
-	);
+	return !carriesToolCall(message) && !blocksOf(message).some((block) => block.type === "text" && block.text?.trim());
 }
 
 /** The one-line gist of a message's thinking, scanned without building the whole text. */
 function thinkingGist(message: MaybeMessage): string {
-	if (message.role !== "assistant" || !Array.isArray(message.content)) {
+	if (message.role !== "assistant") {
 		return "";
 	}
-	for (const block of message.content as ReadonlyArray<{ type: string; thinking?: string }>) {
+	for (const block of blocksOf(message)) {
 		if (block.type !== "thinking" || !block.thinking) {
 			continue;
 		}
@@ -518,6 +528,14 @@ function argPath(args: Record<string, unknown>): string {
 
 function outputOf(result: Result): string {
 	return result.content.flatMap((block) => (block.type === "text" ? [block.text ?? ""] : [])).join("\n");
+}
+
+/** The output's non-blank lines. */
+function outputLines(result: Result): string[] {
+	return outputOf(result)
+		.trim()
+		.split("\n")
+		.filter((line) => line.trim());
 }
 
 function diffStat(diff: string, theme: Theme): string {
@@ -579,25 +597,20 @@ function headerFor(toolName: string, raw: unknown, theme: Theme, argsComplete: b
 			return { main: `${title} ${theme.fg("accent", shorten(typeof args.path === "string" ? args.path : "."))}`, suffix: "" };
 		case "codemode":
 			return { main: title, suffix: "" };
-		default: {
-			const pairs = Object.entries(args)
-				.map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
-				.join(" ");
-			return { main: pairs ? `${title} ${theme.fg("muted", cut(pairs, HEADER_CHARS))}` : title, suffix: "" };
-		}
+		default:
+			return { main: fallbackCall(toolName, args, theme), suffix: "" };
 	}
 }
 
 function summary(toolName: string, result: Result, theme: Theme, context: Context): string {
-	const output = outputOf(result).trim();
-	const lines = output ? output.split("\n").filter((line) => line.trim()).length : 0;
-
-	if (context.isError) {
-		return theme.fg("error", cut(output.split("\n").find((line) => line.trim()) ?? "failed", SUMMARY_CHARS));
+	// A header-only tool already hides its result, so only its failure earns a line.
+	if (HEADER_ONLY.has(toolName) && !context.isError) {
+		return "";
 	}
 
-	if (HEADER_ONLY.has(toolName)) {
-		return "";
+	const lines = outputLines(result);
+	if (context.isError) {
+		return theme.fg("error", cut(lines[0] ?? "failed", SUMMARY_CHARS));
 	}
 
 	const details = (result.details ?? {}) as {
@@ -607,7 +620,9 @@ function summary(toolName: string, result: Result, theme: Theme, context: Contex
 	};
 	// One line of output is worth showing verbatim; more is only worth counting.
 	const counted = (many: string) =>
-		lines <= 1 ? cut(output, SUMMARY_CHARS) : `${lines}${details.truncation?.truncated ? "+" : ""} ${many}`;
+		lines.length <= 1
+			? cut(lines[0] ?? "", SUMMARY_CHARS)
+			: `${lines.length}${details.truncation?.truncated ? "+" : ""} ${many}`;
 	const slow = context.durationMs !== undefined && context.durationMs >= 1000;
 	const elapsed = slow ? theme.fg("muted", ` · ${(context.durationMs! / 1000).toFixed(1)}s`) : "";
 
@@ -942,12 +957,7 @@ class ChatThinkingRow implements Component {
 
 /** Whether the message's first tool call draws its thinking on a chapter row, not a narrative one. */
 function carriesChapterToolCall(message: MaybeMessage): boolean {
-	if (!Array.isArray(message.content)) {
-		return false;
-	}
-	const first = (message.content as ReadonlyArray<{ type: string; name?: string }>).find(
-		(block) => block.type === "toolCall",
-	);
+	const first = blocksOf(message).find((block) => block.type === "toolCall");
 	return first !== undefined && !narrative(first.name ?? "");
 }
 
@@ -1101,28 +1111,29 @@ function emptySlot(context: Context): Component {
 	return (state.empty ??= new Container());
 }
 
+function shownLines(result: Result, expanded: boolean): { shown: string[]; hidden: number } {
+	const lines = outputLines(result);
+	const shown = expanded ? lines : lines.slice(0, FALLBACK_LINES);
+	return { shown, hidden: lines.length - shown.length };
+}
+
+/** Shown lines, styled as tool output. */
+function outputBody(shown: string[], theme: Theme): string {
+	return shown.map((line) => theme.fg("toolOutput", line)).join("\n");
+}
+
 /** Second line for a narrative tool without renderers of its own, reused so the frame's child stays stable. */
 function noteFallback(context: Context, result: Result, options: { expanded: boolean }, theme: Theme): Component {
 	const state = slots(context);
 	state.noteFallback ??= new Text("", 0, 0);
-	const lines = outputOf(result)
-		.trim()
-		.split("\n")
-		.filter((line) => line.trim())
-		.slice(0, options.expanded ? Number.MAX_SAFE_INTEGER : 10);
-	state.noteFallback.setText(lines.map((line) => theme.fg("toolOutput", line)).join("\n"));
+	state.noteFallback.setText(outputBody(shownLines(result, options.expanded).shown, theme));
 	return state.noteFallback;
 }
 
 function fallbackResult(result: Result, options: { expanded: boolean }, theme: Theme): Component {
-	const lines = outputOf(result)
-		.trim()
-		.split("\n")
-		.filter((line) => line.trim());
-	const shown = options.expanded ? lines : lines.slice(0, 10);
-	const body = shown.map((line) => theme.fg("toolOutput", line)).join("\n");
-	const rest = shown.length < lines.length ? `\n${theme.fg("muted", `... (${lines.length - shown.length} more lines)`)}` : "";
-	return new Text(body + rest, 0, 0);
+	const { shown, hidden } = shownLines(result, options.expanded);
+	const rest = hidden > 0 ? `\n${theme.fg("muted", `... (${hidden} more lines)`)}` : "";
+	return new Text(outputBody(shown, theme) + rest, 0, 0);
 }
 
 function fallbackCall(toolName: string, args: unknown, theme: Theme): string {
@@ -1134,18 +1145,12 @@ function fallbackCall(toolName: string, args: unknown, theme: Theme): string {
 		: theme.fg("toolTitle", theme.bold(toolName));
 }
 
-/** Any message shape that can carry thinking blocks. */
-interface MaybeMessage {
-	role: string;
-	content?: unknown;
-}
-
 /** Thinking a message carries, in one string. */
 function thinkingText(message: MaybeMessage): string {
-	if (message.role !== "assistant" || !Array.isArray(message.content)) {
+	if (message.role !== "assistant") {
 		return "";
 	}
-	return (message.content as ReadonlyArray<{ type: string; thinking?: string }>)
+	return blocksOf(message)
 		.filter((block) => block.type === "thinking" && block.thinking?.trim())
 		.map((block) => (block.thinking ?? "").trim())
 		.join("\n\n");
@@ -1452,8 +1457,7 @@ function rebuild(ctx: ExtensionContext): void {
 			thinking.header = { main: thinkingGist(message), suffix: "" };
 			messageEntries.set(message, thinking);
 		}
-		if (!Array.isArray(message.content)) continue;
-		for (const block of message.content as ReadonlyArray<{ type: string; id?: string; name?: string }>) {
+		for (const block of blocksOf(message)) {
 			if (block.type === "toolCall" && typeof block.id === "string") {
 				toolEntry(block.id, narrative(block.name ?? ""));
 			}
