@@ -380,8 +380,7 @@ class ChapterRow implements Component {
 		}
 		const { pending, failed } = tally(run);
 		// One line, always: the row must never wrap.
-		// One cell of slack: a single-line row must never reach the terminal's last cell.
-		const inner = Math.max(1, width - this.outputPad * 2 - 1);
+		const inner = innerWidth(width, this.outputPad);
 		const content = this.contentOf(run, entry, pending, failed, inner);
 		if (content === undefined) {
 			return [];
@@ -757,6 +756,26 @@ function delegated(
 	return component;
 }
 
+interface NativeAction {
+	call: Component;
+	result?: Component;
+	/** Whether the tool frames its own rows; nesting it in ours would double the padding. */
+	selfFramed: boolean;
+}
+
+/** Whether the open row shows the tool's own call and result in place of the zen summary line. */
+function showsNative(entry: Entry): boolean {
+	return entry.open === true && listMode(entry.run);
+}
+
+/** The tool's own call and result, once the call slot has built them. */
+function nativeAction(context: Context, entry: Entry): NativeAction | undefined {
+	const state = slots(context);
+	return showsNative(entry) && state.nativeCall
+		? { call: state.nativeCall, result: state.nativeResult, selfFramed: state.nativeSelfFramed === true }
+		: undefined;
+}
+
 /** The action row's frame: the summary line, or the tool's own row while it is open. */
 function actionFrame(context: Context, theme: Theme, entry: Entry): Box {
 	const state = slots(context);
@@ -764,10 +783,11 @@ function actionFrame(context: Context, theme: Theme, entry: Entry): Box {
 	const frame = state.frame;
 	frame.setBgFn((line) => theme.bg(rowBackground(context), line));
 	frame.clear();
-	if (entry.open && listMode(entry.run) && state.nativeCall) {
-		frame.addChild(state.nativeCall);
-		if (state.nativeResult) {
-			frame.addChild(state.nativeResult);
+	const native = nativeAction(context, entry);
+	if (native) {
+		frame.addChild(native.call);
+		if (native.result) {
+			frame.addChild(native.result);
 		}
 		return frame;
 	}
@@ -780,6 +800,18 @@ function actionFrame(context: Context, theme: Theme, entry: Entry): Box {
 
 /** Thinking's own background, distinct from every tool state so it cannot read as part of an action. */
 const THINKING_BG = "customMessageBg";
+
+/** A row's drawing width: padding at both ends, and a cell of slack so a line never fills the terminal. */
+function innerWidth(width: number, outputPad: number): number {
+	return Math.max(1, width - outputPad * 2 - 1);
+}
+
+/** A thinking block as its row shows it: the one-line gist, or the whole block once it is open. */
+function thinkingRowContent(entry: Entry, theme: Theme, width: number, full: boolean): string {
+	return full
+		? thinkingDetail(entry, theme)
+		: keepBackground(truncateToWidth(entryLine(entry, theme, width), width, "…"));
+}
 
 /**
  * The thinking rows above or below a tool row, each in its own frame. Redrawn from live state,
@@ -810,7 +842,7 @@ class ThinkingRows implements Component {
 			this.layout = [];
 			return [];
 		}
-		const inner = Math.max(1, width - this.outputPad * 2 - 1);
+		const inner = innerWidth(width, this.outputPad);
 		const live = new Set(blocks.map((block) => block.id));
 		for (const id of this.rows.keys()) {
 			if (!live.has(id)) {
@@ -823,7 +855,7 @@ class ThinkingRows implements Component {
 			// A dark line keeps the block from reading as part of the row beside it.
 			if (this.after) out.push("");
 			const top = out.length;
-			const content = this.contentOf(block, inner);
+			const content = thinkingRowContent(block, this.theme, inner, block.open === true || !listMode(block.run));
 			let row = this.rows.get(block.id);
 			if (!row) {
 				row = { text: new Text("", this.outputPad, 1, (line) => this.theme.bg(THINKING_BG, line)), content: "" };
@@ -857,14 +889,6 @@ class ThinkingRows implements Component {
 		return { handled: true };
 	}
 
-	/** One line while the transcript is expanded, the full block when the row was clicked open. */
-	private contentOf(block: Entry, inner: number): string {
-		if (!listMode(block.run) || block.open) {
-			return thinkingDetail(block, this.theme);
-		}
-		return keepBackground(truncateToWidth(entryLine(block, this.theme, inner), inner, "…"));
-	}
-
 	invalidate(): void {
 		this.rows.clear();
 		this.layout = [];
@@ -892,10 +916,7 @@ class ChatThinkingRow implements Component {
 		if (!entry || takingOver(entry.run)) {
 			return [];
 		}
-		const inner = Math.max(1, width - this.outputPad * 2 - 1);
-		const content = entry.open
-			? thinkingDetail(entry, this.theme)
-			: keepBackground(truncateToWidth(entryLine(entry, this.theme, inner), inner, "…"));
+		const content = thinkingRowContent(entry, this.theme, innerWidth(width, this.outputPad), entry.open === true);
 		if (content !== this.content) {
 			this.text.setText(content);
 			this.content = content;
@@ -970,6 +991,15 @@ function consumeClick(
 	return state[slot];
 }
 
+/** Fill a cached container from its children, in place so a pre-rebuild component keeps drawing it. */
+function restack(container: Container, children: Component[]): Container {
+	container.clear();
+	for (const child of children) {
+		container.addChild(child);
+	}
+	return container;
+}
+
 /** One tool row expanded: thinking above in the call slot, thinking after in the result slot. */
 function expandedRow(context: Context, theme: Theme, entry: Entry, top: boolean): Component {
 	const state = slots(context);
@@ -980,11 +1010,12 @@ function expandedRow(context: Context, theme: Theme, entry: Entry, top: boolean)
 	// The action slot holds either the zen summary frame or the tool's own row while open.
 	state.actionBox ??= new Container();
 	const action = state.actionBox;
+	const native = nativeAction(context, entry);
 	action.clear();
-	if (entry.open && listMode(entry.run) && state.nativeCall && state.nativeSelfFramed) {
-		action.addChild(state.nativeCall);
-		if (state.nativeResult) {
-			action.addChild(state.nativeResult);
+	if (native?.selfFramed) {
+		action.addChild(native.call);
+		if (native.result) {
+			action.addChild(native.result);
 		}
 	} else {
 		action.addChild(actionFrame(context, theme, entry));
@@ -999,10 +1030,12 @@ function expandedRow(context: Context, theme: Theme, entry: Entry, top: boolean)
 	});
 	state.expandedBefore ??= new ThinkingRows(entry.id, theme, context.outputPad, false, () => context.invalidate());
 	state.expandedStack ??= new Container();
-	state.expandedStack.clear();
-	state.expandedStack.addChild(state.expandedBefore);
-	state.expandedStack.addChild(state.actionRegion);
-	return consumeClick(context, entry.run, state.expandedStack, "stackRegion");
+	return consumeClick(
+		context,
+		entry.run,
+		restack(state.expandedStack, [state.expandedBefore, state.actionRegion]),
+		"stackRegion",
+	);
 }
 
 function rowFrame(context: Context, theme: Theme): RowFrame {
@@ -1226,10 +1259,12 @@ export default function (pi: ExtensionAPI) {
 					const state = slots(context);
 					state.narrativeBefore ??= new ThinkingRows(entry.id, theme, context.outputPad, false, () => context.invalidate());
 					state.narrativeStack ??= new Container();
-					state.narrativeStack.clear();
-					state.narrativeStack.addChild(state.narrativeBefore);
-					state.narrativeStack.addChild(row);
-					return consumeClick(context, entry.run, state.narrativeStack, "narrativeRegion");
+					return consumeClick(
+						context,
+						entry.run,
+						restack(state.narrativeStack, [state.narrativeBefore, row]),
+						"narrativeRegion",
+					);
 				}
 				const entry = toolEntry(context.toolCallId, false);
 				entry.header = headerFor(toolName, args, theme, context.argsComplete);
@@ -1238,8 +1273,7 @@ export default function (pi: ExtensionAPI) {
 				if (!context.expanded && run?.open !== true) {
 					return chapterClick(context, entry.id, chapterRow(context, theme));
 				}
-				if (entry.open && listMode(run)) {
-					// The row is open: its frame shows the tool's own call instead of the summary line.
+				if (showsNative(entry)) {
 					const state = slots(context);
 					state.nativeCall = builtinCall(context, args, theme, toolName, render);
 					state.nativeSelfFramed = selfFramed;
@@ -1249,12 +1283,13 @@ export default function (pi: ExtensionAPI) {
 					// An opened chapter gets a header row, which folds it back on click.
 					const state = slots(context);
 					state.runHeader ??= new ChapterRow(entry.id, theme, context.outputPad, "header");
+					state.runGap ??= new Spacer(1);
 					state.runStack ??= new Container();
-					state.runStack.clear();
-					state.runStack.addChild(runFoldClick(context, entry.id, state.runHeader, "runHeaderRegion"));
-					state.runStack.addChild((state.runGap ??= new Spacer(1)));
-					state.runStack.addChild(row);
-					return state.runStack;
+					return restack(state.runStack, [
+						runFoldClick(context, entry.id, state.runHeader, "runHeaderRegion"),
+						state.runGap,
+						row,
+					]);
 				}
 				return row;
 			},
@@ -1277,8 +1312,8 @@ export default function (pi: ExtensionAPI) {
 				stopStaleTimer(context);
 				if (context.expanded || entry.run?.open === true) {
 					const state = slots(context);
-					if (entry.open && listMode(entry.run)) {
-						// The row is open: append the tool's own result under its call.
+					if (showsNative(entry)) {
+						// Append the tool's own result under its call.
 						const nativeOptions = { ...options, expanded: true };
 						const fallback = () => fallbackResult(result, nativeOptions, theme);
 						state.nativeResult = builtinResult(context, result, nativeOptions, theme, render, fallback);
@@ -1290,12 +1325,13 @@ export default function (pi: ExtensionAPI) {
 						return row;
 					}
 					state.runFooter ??= new ChapterRow(entry.id, theme, context.outputPad, "footer");
+					state.footGap ??= new Spacer(1);
 					state.runFooterStack ??= new Container();
-					state.runFooterStack.clear();
-					state.runFooterStack.addChild(row);
-					state.runFooterStack.addChild((state.footGap ??= new Spacer(1)));
-					state.runFooterStack.addChild(runFoldClick(context, entry.id, state.runFooter, "runFooterRegion"));
-					return state.runFooterStack;
+					return restack(state.runFooterStack, [
+						row,
+						state.footGap,
+						runFoldClick(context, entry.id, state.runFooter, "runFooterRegion"),
+					]);
 				}
 				// The call slot draws the chapter row; this one stays empty so it is drawn once.
 				return emptySlot(context);
