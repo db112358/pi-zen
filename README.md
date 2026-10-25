@@ -53,6 +53,7 @@ extensions/zen.ts               the extension: settings, lifecycle and renderer 
 extensions/lib/components.ts    the rows: tool frames, chapter rows, thinking rows
 extensions/lib/format.ts        pure formatting: action lines, result summaries, thinking text
 extensions/lib/model.ts         the chapter model: entries, grouping, shared maps, rebuild
+extensions/lib/tools.ts         the per-tool choices: narrative rows, header-only results, counted nouns
 scripts/                        fork install and patch helpers
 tests/zen-harness.mjs           component-level checks (fake pi, no terminal)
 tests/zen-format-test.mjs       table checks for the exported formatting helpers

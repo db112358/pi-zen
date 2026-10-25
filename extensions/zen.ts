@@ -28,7 +28,6 @@ import {
 	firstToolOf,
 	foldThinking,
 	invalidators,
-	narrative,
 	openChapters,
 	rebuild as rebuildModel,
 	refreshChapter,
@@ -40,6 +39,7 @@ import {
 	type Chapter,
 	type ToolEntry,
 } from "./lib/model";
+import { narrative } from "./lib/tools";
 
 type Context = Parameters<NonNullable<ToolRenderers["renderCall"]>>[2];
 type Result = Parameters<NonNullable<ToolRenderers["renderResult"]>>[0];
