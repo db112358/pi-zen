@@ -18,7 +18,7 @@
     "@earendil-works/pi-tui": "*"
   },
   "scripts": {
-    "test": "node tests/zen-harness.mjs && node tests/zen-real-test.mjs",
+    "test": "node tests/zen-harness.mjs && node tests/zen-format-test.mjs && node tests/zen-real-test.mjs",
     "test:click": "bash tests/zen-click-test.sh"
   }
 }
