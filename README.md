@@ -8,7 +8,8 @@ cannot bury the conversation in command output.
 - **Chapter row** — everything since the last user message is one `▶ N actions · …` line.
 - **First thinking** — a run with no action yet shows its thinking as the same purple row in the
   transcript, until the first tool call gives the chapter a row. A narrative row (`set_andon`)
-  never takes that row over: it stays above the card.
+  never takes that row over: it stays above the card. It always draws the gist: pi's `expanded`
+  flag means thinking visibility (on by default), not row openness.
 - **Click it** — the chapter opens into one summary row per action and thinking block, closed by
   a `▼` row above and an `▲` row below; either one folds it back, so a long chapter never strands
   the fold target at the top.

@@ -45,7 +45,10 @@ type Context = Parameters<NonNullable<ToolRenderers["renderCall"]>>[2];
 type Result = Parameters<NonNullable<ToolRenderers["renderResult"]>>[0];
 type ResultOptions = Parameters<NonNullable<ToolRenderers["renderResult"]>>[1];
 
-/** pi's `setThinkingRow` shape, so zen loads against a build without the hook. */
+/**
+ * pi's `setThinkingRow` shape, so zen loads against a build without the hook. Its `expanded` is
+ * thinking visibility, on by default, not whether the row is open.
+ */
 type ThinkingRowRenderer = (
 	message: MaybeMessage,
 	options: { expanded: boolean; outputPad: number },
@@ -265,7 +268,11 @@ function carriesChapterToolCall(message: MaybeMessage): boolean {
 	return first !== undefined && !narrative(first.name ?? "");
 }
 
-/** The row pi draws for a message whose thinking it omits, while no chapter row has taken it over. */
+/**
+ * The row pi draws for a message whose thinking it omits, while no chapter row has taken it over.
+ * It ignores `expanded`, which is thinking visibility and on by default: honouring it would unfold
+ * every chat row and unpin the gist. Only a click opens one.
+ */
 function chatThinkingRow(
 	message: MaybeMessage,
 	options: { expanded: boolean; outputPad: number },
