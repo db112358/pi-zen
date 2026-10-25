@@ -5,16 +5,10 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { blocksOf, thinkingGist, type ActionHeader, type MaybeMessage } from "./format";
+import { narrative } from "./tools";
 
 /** A row's colour: running, failed, or done. */
 export type Background = "toolPendingBg" | "toolErrorBg" | "toolSuccessBg";
-
-/** Tools that head a chapter and keep their own row: their result is the narrative. */
-const NARRATIVE = new Set(["set_andon"]);
-
-export function narrative(toolName: string): boolean {
-	return NARRATIVE.has(toolName);
-}
 
 /** The fields both kinds of row carry. */
 interface BaseEntry {

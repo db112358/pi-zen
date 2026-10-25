@@ -5,6 +5,7 @@
 
 import { homedir } from "node:os";
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { countNoun, headerOnly } from "./tools";
 
 export const ACTION_HEADER_CHARS = 100;
 export const RESULT_SUMMARY_CHARS = 120;
@@ -12,9 +13,6 @@ export const RESULT_SUMMARY_CHARS = 120;
 export const COMMAND_CHARS = 400;
 /** Longest prefix scanned for a gist; a first line longer than this is cut to a preview anyway. */
 const GIST_SCAN = 4096;
-
-/** Tools that hide their whole result when collapsed; a summary would only add noise. */
-const HEADER_ONLY = new Set(["read", "write"]);
 
 /** An action header in two parts, so a width budget can cut the text and keep the structure. */
 export interface ActionHeader {
@@ -198,7 +196,7 @@ export function actionHeader(toolName: string, raw: unknown, theme: Theme, argsC
 
 export function resultSummary(toolName: string, result: Result, theme: Theme, context: SummaryContext): string {
 	// A header-only tool already hides its result, so only its failure earns a line.
-	if (HEADER_ONLY.has(toolName) && !context.isError) {
+	if (headerOnly(toolName) && !context.isError) {
 		return "";
 	}
 
@@ -217,6 +215,7 @@ export function resultSummary(toolName: string, result: Result, theme: Theme, co
 		lines.length <= 1
 			? cut(lines[0] ?? "", RESULT_SUMMARY_CHARS)
 			: `${lines.length}${details.truncation?.truncated ? "+" : ""} ${many}`;
+	const noun = countNoun(toolName) ?? "lines";
 	const slow = context.durationMs !== undefined && context.durationMs >= 1000;
 	const elapsed = slow ? theme.fg("muted", ` · ${(context.durationMs! / 1000).toFixed(1)}s`) : "";
 
@@ -226,22 +225,13 @@ export function resultSummary(toolName: string, result: Result, theme: Theme, co
 		case "edit":
 			styled = details.diff ? diffStat(details.diff, theme) : theme.fg("success", "applied");
 			break;
-		case "grep":
-			plain = counted("matches");
-			break;
-		case "find":
-			plain = counted("files");
-			break;
-		case "ls":
-			plain = counted("entries");
-			break;
 		case "codemode": {
 			const calls = details.calls?.length ?? 0;
-			plain = calls ? `${calls} tool call${calls === 1 ? "" : "s"}` : counted("lines");
+			plain = calls ? `${calls} tool call${calls === 1 ? "" : "s"}` : counted(noun);
 			break;
 		}
 		default:
-			plain = counted("lines");
+			plain = counted(noun);
 	}
 	return (styled ?? theme.fg("muted", plain)) + elapsed;
 }
