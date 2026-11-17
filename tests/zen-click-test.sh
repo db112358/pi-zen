@@ -10,7 +10,7 @@ set -euo pipefail
 
 PI="${PI_BIN:-$HOME/.pi/agent/bin/pi}"
 NAME="zen-click-test-$$"
-DIR="$(mktemp -d -t zen-click-test)"
+DIR="$(mktemp -d -t zen-click-test.XXXXXX)"
 cleanup() {
 	tmux kill-session -t "$NAME" 2>/dev/null || true
 	rm -rf "$DIR"
